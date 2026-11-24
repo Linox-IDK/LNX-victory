@@ -925,10 +925,10 @@ fn reconcile_row_interp(elems: &mut [SigElement]) {
         if let Some(&(force_const, used_mode)) = row_mode.get(&row) {
             if force_const {
                 e.interp = 1;
-            } else if e.usage == 0 {
-                if let Some(m) = used_mode {
-                    e.interp = m;
-                }
+            } else if e.usage == 0
+                && let Some(m) = used_mode
+            {
+                e.interp = m;
             }
         }
     }
