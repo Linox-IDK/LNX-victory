@@ -43,7 +43,21 @@ pub(crate) fn counts() -> (u64, u64) {
 fn build() -> &'static [u8; 32] {
     static BUILD: OnceLock<[u8; 32]> = OnceLock::new();
     BUILD.get_or_init(|| {
-        let exe = std::env::current_exe().and_then(std::fs::read);
+        // The translator's source fingerprint (build.rs), not the whole
+        // executable: a rebuild that leaves the translator alone keeps the
+        // cache. `VICTORY_SHADER_KEY_EXE=1` keys on the executable as before.
+        let exe = if std::env::var_os("VICTORY_SHADER_KEY_EXE").is_some_and(|v| v == "1") {
+            std::env::current_exe().and_then(std::fs::read)
+        } else {
+            let mut key = env!("VICTORY_SHADER_SOURCE_HASH").as_bytes().to_vec();
+            key.extend_from_slice(env!("CARGO_PKG_VERSION").as_bytes());
+            key.push(u8::from(cfg!(feature = "diagnostics")));
+            key.push(u8::from(cfg!(debug_assertions)));
+            // The host's wave width picks the form of wave64 programs: an
+            // offline warm run must not hand a 32-lane card 64-lane forms.
+            key.extend_from_slice(&victory_shader::emit::host_max_wave().to_le_bytes());
+            Ok(key)
+        };
         let limit = victory_shader::emit::loop_limit();
         if limit != victory_shader::emit::DEFAULT_LOOP_LIMIT {
             tracing::warn!(
@@ -87,6 +101,13 @@ fn build() -> &'static [u8; 32] {
             }
         }
     })
+}
+
+/// Offline warming (`victory translate` with `VICTORY_WARM_CACHE=1`):
+/// translates `container` into the cache as the runtime would; whether it
+/// translated.
+pub fn warm(container: &[u8]) -> bool {
+    host_shader(container).is_ok()
 }
 
 /// The translation of a console shader container, from the cache when

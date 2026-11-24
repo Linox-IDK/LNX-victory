@@ -233,8 +233,20 @@ pub(crate) fn pc_format(format: u32) -> u32 {
         118 => 45,
         119 => 46,
         120 => 47,
+        // R9G9B9E5_SHAREDEXP cannot be a render target or UAV on NVIDIA (Series S
+        // mode makes 1080p targets of it). `VICTORY_RGB9E5_AS_R11=1` names
+        // R11G11B10_FLOAT (same size per texel) instead, everywhere. Off by
+        // default: the title packs light as R9G9B9E5 bits into R32_UINT
+        // textures and samples them through R9G9B9E5 views (`alias_of`);
+        // read as R11G11B10 those bits are garbage (washed-out purple frames).
+        67 if rgb9e5_as_r11() => 26,
         other => other,
     }
+}
+
+fn rgb9e5_as_r11() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_RGB9E5_AS_R11").is_some_and(|v| v == "1"))
 }
 
 /// The format of a texture the host GPU renders to or writes as unordered
@@ -1675,6 +1687,14 @@ fn host_texture(
         Type: D3D12_HEAP_TYPE_DEFAULT,
         ..Default::default()
     };
+    if let Some(k) = skip_mips(host, &d)
+        && let Some(t) = reserved_texture(host, &d, state, k)
+    {
+        crate::host::name(&t, || {
+            format!("texture {}x{} f{} flags {:#x} (top {k} levels unbacked)", d.width, d.height, d.format, d.flags)
+        });
+        return Some(t);
+    }
     let mut texture: Option<ID3D12Resource> = None;
     // SAFETY: the description has the host layout (checked size, same
     // fields); the out pointer is ours.
@@ -1691,6 +1711,33 @@ fn host_texture(
             &mut texture,
         )
     };
+    // A format the host GPU cannot write as an unordered-access view (B5G5R5A1
+    // on NVIDIA): made again without UAV use, so it still exists and renders.
+    let made = match made {
+        Err(_) if d.flags & UNORDERED != 0 => {
+            let mut d2 = d;
+            d2.flags &= !UNORDERED;
+            texture = None;
+            // SAFETY: as above, with fewer flags.
+            let again = unsafe {
+                host.device.CreateCommittedResource(
+                    &heap,
+                    D3D12_HEAP_FLAG_NONE,
+                    (&raw const d2).cast(),
+                    D3D12_RESOURCE_STATES(
+                        crate::host::legal_for(d2.flags, crate::host::texture_state(state)) as i32,
+                    ),
+                    clear_value.as_ref().map(|v| std::ptr::from_ref(v).cast()),
+                    &mut texture,
+                )
+            };
+            if again.is_ok() {
+                tracing::warn!(desc = ?d, "host texture made without unordered access (the host refuses it for this format)");
+            }
+            again
+        }
+        other => other,
+    };
     if let Err(e) = made {
         tracing::warn!(error = %e, desc = ?d, "no host texture");
     }
@@ -1700,6 +1747,243 @@ fn host_texture(
         });
     }
     texture
+}
+
+/// `VICTORY_TEXTURE_SKIP_MIPS=k` (1 to 3; unset or 0 off): big
+/// block-compressed 2D textures the title fills get no memory for their top
+/// `k` levels. The texture keeps the title's size, levels and subresource
+/// numbers (barriers, copies and size queries are as before); it is a
+/// reserved texture whose tiles are mapped from level `k` down, and views
+/// of it clamp sampling to level `k`. Each skipped level quarters what is
+/// left: a card with 8 GB filled up with the title's textures (13,000 of
+/// them left waiting, people and walls drawn without textures), level 0
+/// alone being three quarters of each.
+///
+/// What it assumes: the host's tiled resources are tier 2 or higher (a
+/// write to an unmapped tile is dropped, a read gives zero; checked), so
+/// the uploads into the skipped levels go nowhere. A shader that loads
+/// texels of a skipped level directly reads zero.
+fn skip_mips(host: &crate::host::Host, d: &ResourceDesc) -> Option<u32> {
+    static K: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let k = *K.get_or_init(|| {
+        let k = std::env::var("VICTORY_TEXTURE_SKIP_MIPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+            .min(3);
+        if k > 0 {
+            tracing::info!(levels = k, "big compressed textures: top levels without memory");
+        }
+        k
+    });
+    if k == 0 {
+        return None;
+    }
+    static TIER2: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let tier2 = *TIER2.get_or_init(|| {
+        use windows::Win32::Graphics::Direct3D12::*;
+        let mut o = D3D12_FEATURE_DATA_D3D12_OPTIONS::default();
+        // SAFETY: the structure and its size are the feature's.
+        let ok = unsafe {
+            host.device.CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS,
+                (&raw mut o).cast(),
+                size_of::<D3D12_FEATURE_DATA_D3D12_OPTIONS>() as u32,
+            )
+        }
+        .is_ok();
+        let tier = o.TiledResourcesTier.0;
+        if !ok || tier < 2 {
+            tracing::warn!(tier, "VICTORY_TEXTURE_SKIP_MIPS needs tiled resources tier 2: off");
+        }
+        ok && tier >= 2
+    });
+    const TEXTURE2D: u32 = 3;
+    // RENDER_TARGET, DEPTH_STENCIL, UNORDERED_ACCESS.
+    const WRITTEN: u32 = 0x7;
+    // BC1-BC5 and BC6H-BC7, every variant.
+    let compressed = matches!(d.format, 70..=84 | 94..=99);
+    (tier2
+        && compressed
+        && d.dimension == TEXTURE2D
+        && d.depth_or_array_size == 1
+        && u32::from(d.mip_levels) > k
+        && d.width >= 512
+        && d.height >= 512
+        && d.sample_count <= 1
+        && d.flags & WRITTEN == 0)
+        .then_some(k)
+}
+
+/// The private data that says how many top levels of a host texture have
+/// no memory, and the one that keeps its heap alive.
+const SKIP_GUID: windows::core::GUID = windows::core::GUID::from_u128(0x5f3c_1a2e_7b4d_4c8e_9a61_0d2f_3e4b_5a71);
+const SKIP_HEAP_GUID: windows::core::GUID =
+    windows::core::GUID::from_u128(0x5f3c_1a2e_7b4d_4c8e_9a61_0d2f_3e4b_5a72);
+
+/// A reserved texture for `d` with memory for levels `k` and smaller.
+fn reserved_texture(
+    host: &crate::host::Host,
+    d: &ResourceDesc,
+    state: u32,
+    k: u32,
+) -> Option<windows::Win32::Graphics::Direct3D12::ID3D12Resource> {
+    use windows::Win32::Graphics::Direct3D12::*;
+    let mut r = *d;
+    // D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE: what reserved textures take.
+    r.layout = 2;
+    let mut texture: Option<ID3D12Resource> = None;
+    // SAFETY: a texture description in the host layout; out pointer ours.
+    let made = unsafe {
+        host.device.CreateReservedResource(
+            (&raw const r).cast(),
+            D3D12_RESOURCE_STATES(crate::host::legal_for(r.flags, crate::host::texture_state(state)) as i32),
+            None,
+            &mut texture,
+        )
+    };
+    if let Err(e) = made {
+        tracing::debug!(error = %e, "no reserved texture; a whole one instead");
+        return None;
+    }
+    let texture = texture?;
+    let mut total = 0u32;
+    let mut packed = D3D12_PACKED_MIP_INFO::default();
+    let mut shape = D3D12_TILE_SHAPE::default();
+    let mut count = u32::from(r.mip_levels);
+    let mut subs = vec![D3D12_SUBRESOURCE_TILING::default(); count as usize];
+    // SAFETY: our texture; `subs` holds `count` entries.
+    unsafe {
+        host.device.GetResourceTiling(
+            &texture,
+            Some(&raw mut total),
+            Some(&raw mut packed),
+            Some(&raw mut shape),
+            Some(&raw mut count),
+            0,
+            subs.as_mut_ptr(),
+        );
+    }
+    if k >= u32::from(packed.NumStandardMips) {
+        return None;
+    }
+    let start = subs.get(k as usize)?.StartTileIndexInOverallResource;
+    let tiles = total.checked_sub(start).filter(|&n| n > 0)?;
+    let mut heap: Option<ID3D12Heap> = None;
+    // SAFETY: a plain heap description; out pointer ours.
+    let made = unsafe {
+        host.device.CreateHeap(
+            &D3D12_HEAP_DESC {
+                SizeInBytes: u64::from(tiles) * 65536,
+                Properties: D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() },
+                Alignment: 0,
+                Flags: D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES,
+            },
+            &mut heap,
+        )
+    };
+    if made.is_err() {
+        return None;
+    }
+    let heap = heap?;
+    // Every tile from level `k`'s first on, in the order the texture numbers
+    // them (the packed small levels last), onto the heap from its start.
+    let coordinate = D3D12_TILED_RESOURCE_COORDINATE { X: 0, Y: 0, Z: 0, Subresource: k };
+    let size = D3D12_TILE_REGION_SIZE { NumTiles: tiles, UseBox: false.into(), Width: 0, Height: 0, Depth: 0 };
+    let flags = D3D12_TILE_RANGE_FLAG_NONE;
+    let offset = 0u32;
+    // SAFETY: our texture and heap; one region and one range, as counted.
+    unsafe {
+        host.queue().UpdateTileMappings(
+            &texture,
+            1,
+            Some(&raw const coordinate),
+            Some(&raw const size),
+            &heap,
+            1,
+            Some(&raw const flags),
+            Some(&raw const offset),
+            Some(&raw const tiles),
+            D3D12_TILE_MAPPING_FLAG_NONE,
+        );
+        // The texture keeps its heap, and says what it skips.
+        if texture.SetPrivateDataInterface(&SKIP_HEAP_GUID, &heap).is_err()
+            || texture.SetPrivateData(&SKIP_GUID, 4, Some((&raw const k).cast())).is_err()
+        {
+            return None;
+        }
+    }
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static SAVED: AtomicU64 = AtomicU64::new(0);
+    static MADE: AtomicU64 = AtomicU64::new(0);
+    let saved = SAVED.fetch_add(u64::from(start) * 65536, Relaxed) + u64::from(start) * 65536;
+    if MADE.fetch_add(1, Relaxed).is_power_of_two() {
+        tracing::info!(textures = MADE.load(Relaxed), saved_mb = saved >> 20, "textures without their top levels");
+    }
+    Some(texture)
+}
+
+/// How many top levels of `texture` have no memory (`VICTORY_TEXTURE_SKIP_MIPS`).
+pub(crate) fn skipped_mips(texture: &windows::Win32::Graphics::Direct3D12::ID3D12Resource) -> Option<u32> {
+    let mut k = 0u32;
+    let mut size = 4u32;
+    // SAFETY: our own private data, four bytes.
+    unsafe { texture.GetPrivateData(&SKIP_GUID, &raw mut size, Some((&raw mut k).cast())) }.ok()?;
+    (size == 4 && k > 0).then_some(k)
+}
+
+/// A view of a texture whose top `k` levels have no memory: sampling is
+/// clamped to level `k` where the view reaches it (a view of skipped levels
+/// alone is left as it is, and reads zero).
+pub(crate) fn clamp_to_backed(
+    texture: &windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+    desc: &mut Option<windows::Win32::Graphics::Direct3D12::D3D12_SHADER_RESOURCE_VIEW_DESC>,
+    k: u32,
+) {
+    use windows::Win32::Graphics::Direct3D12::*;
+    // SAFETY: a live texture.
+    let own = unsafe { texture.GetDesc() };
+    let levels = u32::from(own.MipLevels);
+    let reaches = |first: u32, count: u32| {
+        let last = if count == u32::MAX { levels.saturating_sub(1) } else { (first + count).saturating_sub(1) };
+        last >= k
+    };
+    match desc {
+        None => {
+            // Typeless textures have no view without a format.
+            let typeless = matches!(own.Format.0, 70 | 73 | 76 | 79 | 82 | 94 | 97);
+            if !typeless {
+                *desc = Some(D3D12_SHADER_RESOURCE_VIEW_DESC {
+                    Format: own.Format,
+                    ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
+                    Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                    Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                        Texture2D: D3D12_TEX2D_SRV {
+                            MostDetailedMip: 0,
+                            MipLevels: u32::MAX,
+                            PlaneSlice: 0,
+                            ResourceMinLODClamp: k as f32,
+                        },
+                    },
+                });
+            }
+        }
+        Some(d) if d.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2D => {
+            // SAFETY: the union member the dimension names.
+            let t = unsafe { &mut d.Anonymous.Texture2D };
+            if reaches(t.MostDetailedMip, t.MipLevels) {
+                t.ResourceMinLODClamp = t.ResourceMinLODClamp.max(k as f32);
+            }
+        }
+        Some(d) if d.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2DARRAY => {
+            // SAFETY: the union member the dimension names.
+            let t = unsafe { &mut d.Anonymous.Texture2DArray };
+            if reaches(t.MostDetailedMip, t.MipLevels) {
+                t.ResourceMinLODClamp = t.ResourceMinLODClamp.max(k as f32);
+            }
+        }
+        Some(_) => {}
+    }
 }
 
 /// A texture's console memory and description; `None` for buffers.

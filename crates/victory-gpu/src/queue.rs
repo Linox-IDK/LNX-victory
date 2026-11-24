@@ -779,6 +779,24 @@ extern "system" fn present(
     #[cfg(windows)]
     release_held(forces());
     let frame = FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+    // The plane count and the first plane's resource each time either
+    // changes (finding why still images flicker: two planes, or two
+    // resources taking turns).
+    {
+        static LAST: std::sync::Mutex<(u32, usize, u64)> = std::sync::Mutex::new((u32::MAX, 0, 0));
+        // SAFETY: the title passes `planes` plane descriptions.
+        let first = (planes > 0)
+            .then(|| unsafe { plane_parameters.as_ref() })
+            .flatten()
+            .filter(|p| p.count > 0 && !p.resources.is_null())
+            // SAFETY: the plane lists `count` resources.
+            .map_or(0, |p| unsafe { *p.resources } as usize);
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if last.0 != planes || last.1 != first {
+            tracing::info!(frame, planes, first = format_args!("{first:#x}"), since = frame - last.2, "presented planes changed");
+            *last = (planes, first, frame);
+        }
+    }
     if frame.is_power_of_two() {
         let (draws, dispatches) = crate::list::take_counts();
         #[cfg(windows)]
@@ -814,6 +832,39 @@ extern "system" fn present(
             crate::capture::dump_targets(frame);
         }
     }
+    // Series S mode presents two planes: the 1080p world and a 4K UI plane over
+    // it (menus, loading art). The first alone is black outside the world.
+    // `VICTORY_PRESENT_PLANE=n` picks the plane shown (default: the last one).
+    // Plane entries are 0x48 bytes apart (token, count, resources, ...).
+    // Without the variable, two planes are blended into one image (`compose`).
+    #[cfg(windows)]
+    let plane_parameters = {
+        static PICK: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+        let pick = *PICK.get_or_init(|| std::env::var("VICTORY_PRESENT_PLANE").ok().and_then(|v| v.trim().parse().ok()));
+        let first_resource = |k: u32| {
+            // SAFETY: the title passes `planes` plane descriptions, 0x48 bytes apart.
+            let p = unsafe { plane_parameters.cast::<u8>().add(0x48 * k as usize).cast::<Plane>().as_ref() }?;
+            // SAFETY: the plane lists `count` resources.
+            (p.count > 0 && !p.resources.is_null()).then(|| unsafe { *p.resources })
+        };
+        if pick.is_none()
+            && planes >= 2
+            && let (Some(world), Some(ui)) = (first_resource(0), first_resource(planes - 1))
+            && crate::compose::present(world, ui, frame)
+        {
+            return S_OK;
+        }
+        let k = pick.unwrap_or(planes.saturating_sub(1)).min(planes.saturating_sub(1));
+        // `VICTORY_GAMMA`: the shown plane goes through our pass to be lifted.
+        if planes > 0
+            && crate::compose::gamma().is_some()
+            && let Some(shown) = first_resource(k)
+            && crate::compose::present_one(shown, frame)
+        {
+            return S_OK;
+        }
+        plane_parameters.cast::<u8>().wrapping_add(0x48 * k as usize).cast::<Plane>()
+    };
     #[cfg(windows)]
     if planes > 0
         // SAFETY: the title passes `planes` plane descriptions.

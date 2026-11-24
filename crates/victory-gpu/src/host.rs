@@ -2727,6 +2727,11 @@ fn hand_back(back: &[Declared]) {
 }
 
 impl Host {
+    /// The host's command queue (tile mappings go through it).
+    pub(crate) fn queue(&self) -> &ID3D12CommandQueue {
+        &self.queue
+    }
+
     /// Whether the host runs mesh shaders at shader model 6.6 (translated
     /// mesh shaders need both); logged once.
     pub(crate) fn mesh_shaders(&self) -> bool {
@@ -4792,7 +4797,7 @@ impl HostList {
 
     #[cfg(feature = "diagnostics")]
     fn note(&self, what: impl FnOnce() -> String, range: Option<(u64, u64)>) {
-        if !dred_on() {
+        if !dred_on() && !timing() {
             crate::capture::op(std::ptr::from_ref(self) as usize, what);
             return;
         }

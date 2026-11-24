@@ -160,6 +160,22 @@ pub fn run(
     jobs: Option<usize>,
 ) -> Result<()> {
     let paths = crate::default_paths(paths)?;
+    // `VICTORY_HOST_MAX_WAVE=32`: translate as for a host whose waves have
+    // at most 32 lanes (as the runtime does on such a card).
+    if let Some(n) = std::env::var("VICTORY_HOST_MAX_WAVE").ok().and_then(|v| v.parse().ok()) {
+        victory_shader::emit::set_host_max_wave(n);
+    }
+    // `VICTORY_WARM_CACHE=1`: every container is translated into the
+    // runtime's shader cache (the configured cache folder) and nothing else
+    // is done with it, so a first run in the world finds its shaders ready.
+    // Run it with the host's wave width (`VICTORY_HOST_MAX_WAVE=32` on
+    // NVIDIA) and the run's switches (`VICTORY_SHADER_LOOP_LIMIT`, ...).
+    if warm_cache() {
+        let cfg = victory_core::Config::load()?;
+        let dir = cfg.cache_subdir("shaders")?;
+        println!("warming    {}", dir.display());
+        victory_hle::modules::d3d12x::use_shader_cache_only(dir);
+    }
     let dll = validate.then(Validator::default_path).flatten();
     if validate {
         Validator::load(dll.as_deref()).map_err(anyhow::Error::msg)?;
@@ -315,7 +331,28 @@ fn translate(
     // The hash a run's log names the shader by (`hash=` in "first bind",
     // "shader does not translate", "host pipeline refused").
     let hash = blake3::hash(&bytes).to_hex()[..16].to_owned();
+    // Diagnostics: `VICTORY_TRANSLATE_ONLY=<hash prefix>,...` translates
+    // those containers alone.
+    static ONLY: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let only = ONLY.get_or_init(|| {
+        std::env::var("VICTORY_TRANSLATE_ONLY")
+            .unwrap_or_default()
+            .split(',')
+            .map(|h| h.trim().to_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect()
+    });
+    if !only.is_empty() && !only.iter().any(|o| hash.starts_with(o.as_str())) {
+        return;
+    }
     let example = || format!("{}{} #{hash}", path.display(), source.label());
+    if warm_cache() {
+        t.containers += 1;
+        if !victory_hle::modules::d3d12x::warm_shader(&bytes) {
+            t.fail("does not translate (warm)".into(), example);
+        }
+        return;
+    }
     t.containers += 1;
     let Ok(container) = Container::parse(&bytes) else {
         return t.fail("no DXIL part (SM5 or older)".into(), example);
@@ -763,4 +800,10 @@ fn tally_structured(program: &ir::Program, s: &structure::Structured, t: &mut Ta
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `VICTORY_WARM_CACHE=1` (see [`run`]).
+fn warm_cache() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_WARM_CACHE").is_some_and(|v| v == "1"))
 }

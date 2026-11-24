@@ -39,6 +39,25 @@ fn host_gpu_failed(what: &str) -> ! {
 /// Keeps the host's translations of the title's shaders in `dir` (a
 /// folder of the cache) across runs, and its compiled pipelines beside it
 /// (`pipelines`).
+/// Offline warming: the shader cache alone in `dir` (no pipelines).
+pub fn use_shader_cache_only(dir: std::path::PathBuf) {
+    #[cfg(windows)]
+    victory_gpu::shader_cache::use_shader_cache(dir);
+    #[cfg(not(windows))]
+    let _ = dir;
+}
+
+/// Offline warming: translates one container into the shader cache.
+pub fn warm_shader(container: &[u8]) -> bool {
+    #[cfg(windows)]
+    return victory_gpu::shader_cache::warm(container);
+    #[cfg(not(windows))]
+    {
+        let _ = container;
+        false
+    }
+}
+
 pub fn use_shader_cache(dir: std::path::PathBuf) {
     #[cfg(windows)]
     {

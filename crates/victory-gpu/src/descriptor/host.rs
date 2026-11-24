@@ -1888,6 +1888,12 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
                 if !fits(texture, desc.as_mut().map(|d| &mut d.Format), false) {
                     return None;
                 }
+                // A texture whose top levels have no memory
+                // (`VICTORY_TEXTURE_SKIP_MIPS`): sampling stops at the first
+                // level that has.
+                if let Some(k) = crate::resource::skipped_mips(texture) {
+                    crate::resource::clamp_to_backed(texture, &mut desc, k);
+                }
                 // SAFETY: a live texture and a slot of our heap.
                 unsafe {
                     device.CreateShaderResourceView(

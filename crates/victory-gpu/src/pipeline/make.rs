@@ -297,16 +297,29 @@ fn workers() -> bool {
     static RUNNING: OnceLock<bool> = OnceLock::new();
     *RUNNING.get_or_init(|| {
         let mut running = false;
-        let workers = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(2, 8));
+        // `VICTORY_PIPELINE_WORKERS=n` sets the count (1 to 16);
+        // `VICTORY_PIPELINE_PRIORITY=normal` runs them level with the title's
+        // threads: below normal, a title using most of the CPU starves them and
+        // the first world frames drop most draws while the queue grows.
+        let workers = std::env::var("VICTORY_PIPELINE_WORKERS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map(|n| n.clamp(1, 16))
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(2, 8))
+            });
+        let normal = std::env::var("VICTORY_PIPELINE_PRIORITY").is_ok_and(|v| v.trim() == "normal");
+        tracing::info!(workers, normal, "host pipeline workers");
         for i in 0..workers {
             let spawned = std::thread::Builder::new()
                 .name(format!("victory-pipelines-{i}"))
-                .spawn(|| {
+                .spawn(move || {
                     // Below the title's own threads (loading, recording).
                     // SAFETY: a plain call on our own thread.
                     unsafe {
                         use windows::Win32::System::Threading::*;
-                        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                        let p = if normal { THREAD_PRIORITY_NORMAL } else { THREAD_PRIORITY_BELOW_NORMAL };
+                        let _ = SetThreadPriority(GetCurrentThread(), p);
                     }
                     loop {
                         next().make();
