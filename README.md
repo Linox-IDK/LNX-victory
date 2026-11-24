@@ -23,10 +23,6 @@ copy. Not affiliated with or endorsed by the title's publisher.
 | Shadowed areas, skin | still dark: the title's ray-traced bounce light does not run yet |
 | Stability | no driver hang or device loss in our runs |
 
-![Sunset yard](docs/screenshots/sunset-yard.webp)
-![Night street, opening credits](docs/screenshots/night-street.png)
-![Visiting room before the texture fix: geometry in place, textures missing (VRAM full)](docs/screenshots/visiting-room-no-textures.webp)
-
 ## What this fork adds
 
 - **Texture quality for 8 GB cards** (`VICTORY_TEXTURE_SKIP_MIPS=1`): big
