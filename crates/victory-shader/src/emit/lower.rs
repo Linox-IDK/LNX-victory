@@ -892,9 +892,15 @@ fn lds_meetings(p: &crate::ir::Program, st: &Structured, all: &[bool]) -> Option
     // (`lds_flag_region`): a read that misses the other host wave's write changes nothing
     // the region leaves behind.
     let flags_on = std::env::var_os("VICTORY_LDS_FLAGS").is_none_or(|v| v != "0");
+    // `VICTORY_LDS_REGION_RACE=1` (LNX-victory, off by default): such a region is taken
+    // anyway. Right where each lane reads back only what it (or its own host wave) wrote, as
+    // per-lane stacks and scratch do; a read of the other half's write in the same region may
+    // see the value from before. Lets 32-lane GPUs run the shadow and trace programs that a
+    // 64-lane `WaveSize` got refused.
+    let race = std::env::var_os("VICTORY_LDS_REGION_RACE").is_some_and(|v| v == "1");
     for r in (0..n).filter(|&r| reads[r] && writes[r]).collect::<Vec<_>>() {
         let blocks: Vec<usize> = (0..n).filter(|&b| !all[b] && find(&mut region, b) == r).collect();
-        if !(flags_on && lds_flag_region(p, st, &blocks)) {
+        if !(race || flags_on && lds_flag_region(p, st, &blocks)) {
             return None;
         }
     }
