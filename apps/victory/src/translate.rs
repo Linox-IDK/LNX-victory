@@ -429,8 +429,13 @@ fn translate(
     let example = || format!("{}{} #{hash}", path.display(), source.label());
     if warm_cache() {
         t.containers += 1;
-        if victory_hle::modules::d3d12x::warm_shader(&bytes).is_err() {
-            t.fail("does not translate (warm)".into(), example);
+        // A translator panic names its container instead of ending the warm.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            victory_hle::modules::d3d12x::warm_shader(&bytes)
+        })) {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => t.fail("does not translate (warm)".into(), example),
+            Err(_) => t.fail("translator panicked (warm)".into(), example),
         }
         return;
     }

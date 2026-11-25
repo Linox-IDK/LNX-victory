@@ -862,6 +862,9 @@ fn meeting_mode() -> u32 {
 /// two host waves of 32, ballots and wave reductions take this host wave's own lanes alone
 /// instead of being refused. Exact for the usual use there (each half counts, elects a first
 /// lane and adds its share with an atomic: the shares add up to the wave's).
+/// The host's group shared memory in dwords (32 KiB, D3D12's limit).
+const LDS_HOST_DWORDS: u32 = 8192;
+
 /// Handshake sites per program ([`Lower::hs_exchange`]).
 const HS_SITES: u32 = 16;
 /// Handshake dwords per console wave: two progress dwords, then per site and round
@@ -1683,7 +1686,12 @@ impl<'a> Lower<'a> {
                                 // numbers go through two exchange dwords past the program's LDS
                                 exchange = Some((s.lds_dwords, group <= 32, all));
                                 s.lds_dwords += 2 * group.div_ceil(64);
-                                if group > 32 && lane_handshake() {
+                                // (only where the area fits in the host's 32 KiB with a sink
+                                // dword to spare)
+                                if group > 32
+                                    && lane_handshake()
+                                    && s.lds_dwords + HS_WAVE * group.div_ceil(64) < LDS_HOST_DWORDS
+                                {
                                     hs = Some(s.lds_dwords);
                                     s.lds_dwords += HS_WAVE * group.div_ceil(64);
                                 }
@@ -1836,7 +1844,11 @@ impl<'a> Lower<'a> {
         // LNX (as VItoriaBr a13a719): console LDS accesses past the program's own
         // LDS read 0 and drop writes; the host's are undefined. They go to a sink
         // dword past everything (`VICTORY_LDS_BOUNDS=0`: unchecked, as before).
-        if s.lds_program > 0 && std::env::var_os("VICTORY_LDS_BOUNDS").is_none_or(|v| v != "0") {
+        // (not where the program fills the host's 32 KiB: unchecked there)
+        if s.lds_program > 0
+            && s.lds_dwords < LDS_HOST_DWORDS
+            && std::env::var_os("VICTORY_LDS_BOUNDS").is_none_or(|v| v != "0")
+        {
             s.lds_sink = Some(s.lds_dwords);
             s.lds_dwords += 1;
         }
@@ -4660,6 +4672,9 @@ impl<'a> Lower<'a> {
         let their_progress = self.hs_ptr(c, 0, other);
         let (lp, exit) = (self.s.m.new_block(), self.s.m.new_block());
         self.s.m.terminate(c, Term::Br(lp));
+        if super::bitcode::debug_sealed() {
+            super::bitcode::SEALED.with(|x| x.borrow_mut().insert(c));
+        }
         let seen = self.s.m.atomic(lp, Rmw::Or, their_progress, z);
         let there = self.s.m.cmp(lp, pred::IUGE, seen, pos);
         self.s.m.terminate(lp, Term::CondBr(there, exit, lp));
@@ -6112,6 +6127,21 @@ impl<'a> Lower<'a> {
             self.set(lo, Val::I32(at));
             self.set(hi, Val::I32(z));
             return Ok(());
+        }
+        // `VICTORY_LANE_HANDSHAKE=1`: a lane mask read as data may be exchanged between
+        // the halves, which moves lowering on to a new block; take those ballots before
+        // this instruction's block is fixed below (they are kept and read again as made).
+        if self.hs.is_some() {
+            for &(reg, v) in &inst.reads {
+                let Reg::S(code) = reg else { continue };
+                if code == EXEC || code == EXEC + 1 {
+                    continue;
+                }
+                let lo = self.x.st.highs.get(&v).copied().unwrap_or(v);
+                if self.x.st.masks.contains_key(&lo) && self.x.st.active.contains(&lo) {
+                    let _ = self.mask_dword(v);
+                }
+            }
         }
         let c = self.cur;
         let src32 = |l: &mut Self, k: usize| -> Result<V, Why> {

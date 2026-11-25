@@ -211,6 +211,16 @@ enum MdDef {
     Node(Vec<Option<Md>>),
 }
 
+thread_local! {
+    /// `VICTORY_DEBUG_SEALED=1`: blocks no code may be added to (debugging).
+    pub(crate) static SEALED: std::cell::RefCell<std::collections::HashSet<usize>> = Default::default();
+}
+
+pub(crate) fn debug_sealed() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_DEBUG_SEALED").is_some())
+}
+
 #[derive(Default)]
 pub(crate) struct Module {
     types: Vec<TypeDef>,
@@ -422,6 +432,9 @@ impl Module {
     }
 
     fn push(&mut self, block: usize, ty: Ty, op: Op) -> V {
+        if debug_sealed() {
+            SEALED.with(|x| assert!(!x.borrow().contains(&block), "LNX debug: code added to a block a handshake closed"));
+        }
         let i = self.insts.len() as u32;
         self.insts.push(Inst { ty, op });
         // Terminators are kept apart, so a block can still grow at its end.
