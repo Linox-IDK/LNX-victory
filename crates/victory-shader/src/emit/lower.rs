@@ -8912,6 +8912,25 @@ impl<'a> Lower<'a> {
                         if *OWN.get_or_init(|| std::env::var_os("VICTORY_FIRSTLANE_OWN").is_some_and(|v| v == "1")) {
                             return int(self, mine);
                         }
+                        // `VICTORY_LANE_HANDSHAKE=1` (LNX): exact without a barrier. Each half
+                        // says whether it has a lane in EXEC here, then gives its first
+                        // lane's value; a half that is not here gives 0 (no lane).
+                        let c = self.cur;
+                        let i32t = self.s.t.i32;
+                        let has = self.s.m.cast(c, Cast::ZExt, any, i32t);
+                        if let Some((lo_has, hi_has)) = self.hs_exchange(c, has)? {
+                            let c = self.cur;
+                            if let Some((lo, hi)) = self.hs_exchange(c, mine)? {
+                                let c = self.cur;
+                                let z = self.s.m.i32(0);
+                                let in_lo = self.s.m.cmp(c, pred::NE, lo_has, z);
+                                let in_hi = self.s.m.cmp(c, pred::NE, hi_has, z);
+                                let hi = self.s.m.select(c, in_hi, hi, lo);
+                                let r = self.s.m.select(c, in_lo, lo, hi);
+                                let r = self.helper_reads_own(a, r);
+                                return int(self, r);
+                            }
+                        }
                         need(self.cur_ir);
                         return Err("a first-lane read where not every lane runs");
                     }
