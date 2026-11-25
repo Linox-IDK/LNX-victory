@@ -1787,6 +1787,7 @@ fn v_cvt_off_f32_i4_is_sixteenths() {
         |i| (f32::from(((i[0] << 28) as i32 >> 28) as i8) / 16.0).to_bits(),
     );
 }
+
 fn assert_no_int64(shader: &HostShader, label: &str) {
     let container = crate::Container::parse(&shader.dxil).expect("DXBC container");
     let features = container.part(crate::FourCC::SFI0).expect("SFI0 part");
