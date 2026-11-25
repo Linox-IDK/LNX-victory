@@ -842,6 +842,15 @@ fn meeting_mode() -> u32 {
 /// barrier as before. What that cannot order is a write and a read inside one region (blocks
 /// joined without an all-lane block between them): refused.
 /// shortcut: two writes in one region are taken not to hit the same dword from both halves.
+/// `VICTORY_BALLOT_OWN=1` (LNX, off by default): in a lane branch of a console wave run as
+/// two host waves of 32, ballots and wave reductions take this host wave's own lanes alone
+/// instead of being refused. Exact for the usual use there (each half counts, elects a first
+/// lane and adds its share with an atomic: the shares add up to the wave's).
+fn ballot_own() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_BALLOT_OWN").is_some_and(|v| v == "1"))
+}
+
 fn lds_meetings(p: &crate::ir::Program, st: &Structured, all: &[bool]) -> Option<Vec<(bool, bool)>> {
     let n = st.exits.len();
     let succ = |b: usize| -> Vec<usize> {
@@ -2248,6 +2257,10 @@ impl<'a> Lower<'a> {
             // each thread walks the bits of this value and works only at its own, which the
             // host wave's OR holds: the same run as with the console wave's OR
             r
+        } else if self.exchange.is_some() && !self.all_lanes(self.cur_ir) && ballot_own() {
+            // shortcut (`VICTORY_BALLOT_OWN=1`, LNX): this host wave's own result, as for
+            // ballots there (see `ballot_own`)
+            r
         } else if self.exchange.is_some() {
             if !self.all_lanes(self.cur_ir) {
                 need(self.cur_ir);
@@ -2346,7 +2359,8 @@ impl<'a> Lower<'a> {
             .op(c, "splitDouble.f64", Attr::ReadNone, split_ty, 102, &[sum]);
         let mut r_lo = self.s.m.extract(c, split, 0);
         let mut r_hi = self.s.m.extract(c, split, 1);
-        if self.exchange.is_some() {
+        // (`VICTORY_BALLOT_OWN=1`: in a lane branch, this host wave's own sum)
+        if self.exchange.is_some() && !(ballot_own() && !self.all_lanes(self.cur_ir)) {
             if !self.all_lanes(self.cur_ir) {
                 need(self.cur_ir);
                 return Err("a wave reduction where not every lane runs");
@@ -3467,16 +3481,34 @@ impl<'a> Lower<'a> {
                 if self.exchange.is_some() {
                     // a host wave's ballot is its half's 32 bits: the halves exchange them
                     let b = self.def_block.get(&lo).copied();
+                    let mut own: Option<(V, V)> = None;
                     if self.local {
                         if !self.local_ok && !self.local_any {
                             return Err("a lane mask read as data in a half-wave");
                         }
                     } else if !self.exchange.as_ref().is_some_and(|e| e.1) && !b.is_none_or(|b| self.all_lanes(b)) {
                         // (a group of 32 or fewer has no other half to exchange with)
-                        need(b.unwrap_or(0));
-                        return Err("a lane mask exchanged where not every lane runs");
+                        // shortcut: `VICTORY_BALLOT_OWN=1` (LNX) gives each host wave its own
+                        // half's bits alone, in their console positions. Exact for what a
+                        // ballot is mostly used for there (a count and a first lane to share
+                        // work out, each lane's place among the set ones): each half then does
+                        // that for its own lanes, and both halves' work adds up to the wave's.
+                        if !ballot_own() {
+                            need(b.unwrap_or(0));
+                            return Err("a lane mask exchanged where not every lane runs");
+                        }
+                        let cl = self.console_lane();
+                        let k32 = self.s.m.i32(32);
+                        let upper = self.s.m.cmp(at, pred::IUGE, cl, k32);
+                        let z = self.s.m.i32(0);
+                        let own_lo = self.s.m.select(at, upper, z, xy.0);
+                        let own_hi = self.s.m.select(at, upper, xy.0, z);
+                        own = Some((own_lo, own_hi));
                     }
-                    xy = self.exchange_halves(at, xy.0);
+                    xy = match own {
+                        Some(o) => o,
+                        None => self.exchange_halves(at, xy.0),
+                    };
                 }
                 self.ballots.insert(lo, xy);
                 xy
@@ -4380,6 +4412,10 @@ impl<'a> Lower<'a> {
             return Ok(some);
         }
         if !made.is_none_or(|b| self.all_lanes(b)) {
+            // `VICTORY_BALLOT_OWN=1`: this host wave's own answer (see `ballot_own`)
+            if ballot_own() {
+                return Ok(some);
+            }
             need(made.unwrap_or(0));
             return Err("a lane mask exchanged where not every lane runs");
         }
