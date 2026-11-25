@@ -908,6 +908,16 @@ impl<'a> Lanes<'a> {
         if let Some(&m) = self.other.get(&k) {
             return (m, false);
         }
+        // (DexNom 76749ce) A scalar pair can be parked in two registers and restored one
+        // dword at a time (scalar moves). Recover the original lane predicate only when
+        // the two words still come from the same known mask, in their original order.
+        if self.p.wave64 {
+            let source = (self.move_source(k.0), self.move_source(k.1));
+            if source != k && let Some(&m) = self.masks.get(&source) {
+                self.masks.insert(k, m);
+                return (m, true);
+            }
+        }
         let p = self.p;
         let (m, derived) = match self.join(k) {
             Some(join) => join,
@@ -954,6 +964,21 @@ impl<'a> Lanes<'a> {
     /// on a forward edge derives from EXEC or a VALU result. Where every
     /// lane arriving so far has the incoming mask set (or clear), the join
     /// is that constant, for a lane can only read it after arriving.
+    /// The value a chain of `s_mov_b32` copies started from.
+    fn move_source(&self, mut value: Value) -> Value {
+        while let Some(&(b, i)) = self.defs.get(&value) {
+            let inst = &self.p.blocks[b].insts[i];
+            let [(Reg::S(_), source)] = inst.reads.as_slice() else {
+                break;
+            };
+            if inst.name() != "s_mov_b32" {
+                break;
+            }
+            value = *source;
+        }
+        value
+    }
+
     fn join(&mut self, k: Key) -> Option<(Bool, bool)> {
         let p = self.p;
         let (lo, hi) = (self.phis.get(&k.0).copied(), self.phis.get(&k.1).copied());
