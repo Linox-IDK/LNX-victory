@@ -7869,44 +7869,6 @@ impl<'a> Lower<'a> {
                 let r = self.s.m.cast(c, op, a, self.s.t.i32);
                 int(self, r)
             }
-            "v_cvt_f32_f64" => {
-                // A double to a float with integer steps (the module has no
-                // double type): the exponent rebiased by 1023 - 127 = 896,
-                // the mantissa's top 23 bits (truncated, not rounded),
-                // infinity or NaN kept, overflow to infinity, underflow to a
-                // signed zero (denormal floats flushed).
-                let x = self.src64(inst, 0)?;
-                let (lo, hi) = self.split64(x);
-                let m = &mut self.s.m;
-                let (k20, k29, k3, k23) = (m.i32(20), m.i32(29), m.i32(3), m.i32(23));
-                let (k7ff, kfffff) = (m.i32(0x7ff), m.i32(0xfffff));
-                let (ksign, kinf, kqnan) = (m.i32(0x8000_0000), m.i32(0x7f80_0000), m.i32(0x40_0000));
-                let (k896, k255, k0) = (m.i32(896), m.i32(255), m.i32(0));
-                let sign = m.bin(c, Bin::And, hi, ksign);
-                let e = m.bin(c, Bin::LShr, hi, k20);
-                let e = m.bin(c, Bin::And, e, k7ff);
-                let mh = m.bin(c, Bin::And, hi, kfffff);
-                let mh = m.bin(c, Bin::Shl, mh, k3);
-                let ml = m.bin(c, Bin::LShr, lo, k29);
-                let mant = m.bin(c, Bin::Or, mh, ml);
-                let e2 = m.bin(c, Bin::Sub, e, k896);
-                let eb = m.bin(c, Bin::Shl, e2, k23);
-                let normal = m.bin(c, Bin::Or, sign, eb);
-                let normal = m.bin(c, Bin::Or, normal, mant);
-                let inf = m.bin(c, Bin::Or, sign, kinf);
-                let lo_nz = m.cmp(c, pred::NE, lo, k0);
-                let mant_nz = m.cmp(c, pred::NE, mant, k0);
-                let any = m.bin(c, Bin::Or, lo_nz, mant_nz);
-                let nan = m.bin(c, Bin::Or, inf, kqnan);
-                let special = m.select(c, any, nan, inf);
-                let under = m.cmp(c, pred::SLE, e2, k0);
-                let over = m.cmp(c, pred::SGE, e2, k255);
-                let is_special = m.cmp(c, pred::EQ, e, k7ff);
-                let r = m.select(c, under, sign, normal);
-                let r = m.select(c, over, inf, r);
-                let r = m.select(c, is_special, special, r);
-                int(self, r)
-            }
             "v_permlane16_b32" | "v_permlanex16_b32" => {
                 // Each lane reads src0 of a lane of its own 32-lane half,
                 // picked by nibble (lane & 15) of {src2, src1}: within its
