@@ -5713,6 +5713,49 @@ impl<'a> Lower<'a> {
     // level 0, so sizes the code shifts by it come out right) and the other
     // dwords (addresses, formats, tiling) have no host value: reading them
     // stops the program.
+    /// View properties (`kind | uav_flag`, `stride`) for a buffer with `stride` and UAV bit `u`.
+    fn buffer_props(stride: u32, u: u32) -> (u32, u32) {
+        if stride >= 4 && stride.is_multiple_of(4) {
+            (12 | u, stride)
+        } else {
+            (11 | u, 0)
+        }
+    }
+
+    /// Calls `dx.op.getDimensions` on the view `src` loaded at `site`.
+    fn dimensions(
+        &mut self,
+        site: Site,
+        src: &Source,
+        props: (u32, u32),
+        mip: Option<u32>,
+    ) -> Result<V, Why> {
+        let h = self.handle(site, src, false, props)?;
+        let c = self.cur;
+        let i32t = self.s.t.i32;
+        let dims = self.s.m.named_struct("dx.types.Dimensions", vec![i32t; 4]);
+        let mip = match mip {
+            Some(m) => self.s.m.i32(m),
+            None => self.s.m.undef(i32t),
+        };
+        Ok(self
+            .s
+            .op(c, "getDimensions", Attr::ReadOnly, dims, 72, &[h, mip]))
+    }
+
+    /// Record count (in elements) from a `dx.op.getDimensions` result `d`.
+    fn buffer_records(&mut self, d: V, props: (u32, u32), used: Option<&UsedResource>) -> V {
+        let c = self.cur;
+        let n = self.s.m.extract(c, d, 0);
+        let stride = used.map_or(0, |u| u.stride);
+        if props.0 & 0xFF == 11 && stride > 1 {
+            let k = self.s.m.i32(stride);
+            self.s.m.bin(c, Bin::UDiv, n, k)
+        } else {
+            n
+        }
+    }
+
     fn descriptor_data(&mut self, inst: &Inst, site: Site) -> Result<(), Why> {
         const OTHER: Why = "a descriptor's address or format read as data";
         let Fields::Smem {
@@ -5794,26 +5837,59 @@ impl<'a> Lower<'a> {
                 self.stale.extend(inst.writes.iter().map(|w| w.1));
                 return Err("a sampler's descriptor read as data");
             }
-            // A buffer view the code only takes the address of, to walk
-            // the memory behind it (a ray-tracing structure): the address
-            // from the host, the other dwords have no value.
-            if count <= 4
-                && let Some((lo, hi)) = self.view_address(site)
-            {
-                for k in 0..count {
-                    let reg = Reg::S(code + k as u8);
-                    match k {
-                        0 => self.write(inst, reg, lo, None),
-                        1 => self.write(inst, reg, hi, None),
-                        _ => {
-                            if let Some(v) = inst.write(reg) {
-                                self.vals.insert(v, Val::Missing(OTHER));
-                                self.stale.insert(v);
+            // A buffer view the code only takes the address or record count of:
+            // address from `view_address` when the low dwords are read, record
+            // count from `getDimensions` when dword 2 (`num_records`) is read.
+            let is_read = |v: Value| {
+                self.x.p.blocks.iter().any(|b| {
+                    b.insts.iter().any(|i| i.reads.iter().any(|r| r.1 == v))
+                        || b.phis.iter().any(|phi| phi.args.contains(&v))
+                })
+            };
+            let used_view = (count <= 4)
+                .then(|| {
+                    let a = self.scalar.get(&site).copied()?;
+                    let rp = *self.x.native.layout.get(a.param)?;
+                    if rp.root != RootType::Table || a.dynamic.is_some() || a.offset % 32 != 0 {
+                        return None;
+                    }
+                    let src = Source::Loaded { load: site, first: 0 };
+                    let u = self.used_kind(&src)?;
+                    (u.dwords == 4 && matches!(u.kind, ResourceType::Srv | ResourceType::Uav))
+                        .then_some((src, u))
+                })
+                .flatten();
+            if let Some((src, used)) = used_view {
+                let need_addr = (0..count.min(2))
+                    .any(|k| inst.write(Reg::S(code + k as u8)).is_some_and(is_read));
+                let need_size =
+                    count >= 3 && inst.write(Reg::S(code + 2)).is_some_and(is_read);
+                let addr = need_addr.then(|| self.view_address(site)).flatten();
+                let size = if need_size {
+                    let u = if used.kind == ResourceType::Uav { 0x1000 } else { 0 };
+                    let props = Self::buffer_props(used.stride, u);
+                    let d = self.dimensions(site, &src, props, None)?;
+                    Some(self.buffer_records(d, props, Some(used)))
+                } else {
+                    None
+                };
+                if addr.is_some() || size.is_some() || (!need_addr && !need_size) {
+                    for k in 0..count {
+                        let reg = Reg::S(code + k as u8);
+                        match (k, addr, size) {
+                            (0, Some((lo, _)), _) => self.write(inst, reg, lo, None),
+                            (1, Some((_, hi)), _) => self.write(inst, reg, hi, None),
+                            (2, _, Some(n)) => self.write(inst, reg, n, None),
+                            _ => {
+                                if let Some(v) = inst.write(reg) {
+                                    self.vals.insert(v, Val::Missing(OTHER));
+                                    self.stale.insert(v);
+                                }
                             }
                         }
                     }
+                    return Ok(());
                 }
-                return Ok(());
             }
             return Err("a descriptor read only as data");
         };
@@ -5845,8 +5921,8 @@ impl<'a> Lower<'a> {
                     || un.starts_with("buffer_store_format")
                 {
                     (10 | u, 0x409)
-                } else if *idxen && format.is_none() && stride >= 4 && stride.is_multiple_of(4) {
-                    (12 | u, stride)
+                } else if *idxen && format.is_none() {
+                    Self::buffer_props(stride, u)
                 } else {
                     (11 | u, 0)
                 };
@@ -5867,18 +5943,8 @@ impl<'a> Lower<'a> {
             }
             _ => return Err("a scalar memory read as data"),
         };
-        let h = self.handle(site, &src, false, props)?;
+        let d = self.dimensions(site, &src, props, (image.is_some() && !uav).then_some(0))?;
         let c = self.cur;
-        let i32t = self.s.t.i32;
-        let dims = self.s.m.named_struct("dx.types.Dimensions", vec![i32t; 4]);
-        let mip = if image.is_some() && !uav {
-            self.s.m.i32(0)
-        } else {
-            self.s.m.undef(i32t)
-        };
-        let d = self
-            .s
-            .op(c, "getDimensions", Attr::ReadOnly, dims, 72, &[h, mip]);
         let field = |l: &mut Self, k: u32| l.s.m.extract(c, d, k);
         let words: Vec<(u32, V)> = match image {
             Some(kind) => {
@@ -5918,15 +5984,7 @@ impl<'a> Lower<'a> {
                 vec![(1, d1), (2, d2), (3, d3), (4, depth)]
             }
             None => {
-                // A raw view counts bytes; the descriptor's record count is in elements.
-                let n = field(self, 0);
-                let stride = used.map_or(0, |u| u.stride);
-                let n = if props.0 & 0xFF == 11 && stride > 1 {
-                    let k = self.s.m.i32(stride);
-                    self.s.m.bin(c, Bin::UDiv, n, k)
-                } else {
-                    n
-                };
+                let n = self.buffer_records(d, props, used);
                 let mut words = vec![(2, n)];
                 // Its address too, where the code computes with it and the
                 // host can tell it.
@@ -11810,5 +11868,43 @@ mod tests {
         assert!(f10(0x3FF).is_nan());
         // A 16-bit float is a half already, sign included.
         assert_eq!(half(0xBC00 << half_shift(16)), -1.0);
+    }
+
+    #[test]
+    fn buffer_record_count_without_buffer_ops_lowers() {
+        // Load 4-dword buffer descriptor into s[8:11], check dword 2 (record count)
+        // for 0 without any buffer_* instruction reading s[8:11].
+        let words = [
+            0xBE84_0300u32, // s_mov_b32 s4, s0
+            0xBE85_0380,    // s_mov_b32 s5, 0
+            0xF408_0202,
+            0xFA00_0000,    // s_load_dwordx4 s[8:11], s[4:5], null
+            0xBF06_800A,    // s_cmp_eq_u32 s10, 0
+            0xBF85_0002,    // s_cbranch_scc1 +2
+            0xD834_0000,
+            0x0000_0000,    // ds_write_b32 v0, v0
+            S_ENDPGM,
+        ];
+        let layout = vec![root(RootType::Table, 0, 0)];
+        let used = vec![UsedResource {
+            kind: ResourceType::Srv,
+            root: RootType::Table,
+            table_offset_dwords: 0,
+            lower_bound: 0,
+            stride: 16,
+            dwords: 4,
+            user_data: 0,
+            slot: 0,
+        }];
+        let lowered = lower_with(&words, layout, used).unwrap();
+        assert!(
+            lowered
+                .user_data
+                .iter()
+                .all(|u| u.root != RootType::Other(super::super::USER_VIEW_ADDRESS)
+                    && u.root != RootType::Other(super::super::USER_VIEW_ADDRESS + 1)),
+            "unread low address dwords should not request USER_VIEW_ADDRESS: {:?}",
+            lowered.user_data
+        );
     }
 }
