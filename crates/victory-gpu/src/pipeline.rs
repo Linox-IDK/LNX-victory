@@ -366,6 +366,23 @@ pub(crate) fn walk_held(this: This) -> bool {
     true
 }
 
+/// The thread-group size of the title's compute pipeline `this` (`numthreads`), read from
+/// its container's console program.
+#[cfg(windows)]
+pub(crate) fn compute_threads(this: This) -> Option<[u32; 3]> {
+    use victory_shader::{Container, FourCC};
+    if this.is_null() {
+        return None;
+    }
+    let [shader] = &pipeline(this).shaders[..] else { return None };
+    let c = Container::parse(&shader.container).ok()?;
+    let programs = victory_shader::native_programs(c.part(FourCC::DXIL)?.data).ok()?;
+    programs.iter().find_map(|p| match &p.io {
+        victory_shader::native::StageIo::Cs(cs) => Some(cs.threads),
+        _ => None,
+    })
+}
+
 /// Whether the title's pipeline `this` is one of the structure builder's.
 #[cfg(windows)]
 pub(crate) fn is_builder(this: This) -> bool {

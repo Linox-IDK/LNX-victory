@@ -1374,14 +1374,19 @@ extern "system" fn driver_hint(_: This, _feature: u64, _value: u64) -> u64 {
     0
 }
 
-/// `DispatchX(x, y, z, flags)`: a dispatch with console flags, which the
-/// host has no use for (the ray-tracing builder dispatches this way).
-extern "system" fn dispatch_x(this: This, x: u32, y: u32, z: u32, _flags: u32) {
+/// `DispatchX(x, y, z, flags)`: a dispatch with console flags (the ray-tracing builder
+/// dispatches this way). Flag 0x20: `x`, `y`, `z` count threads, not groups (LNX, after
+/// DexNom bc3cd4b: the builder's box, header and geometry passes; as groups, 64 times the
+/// work ran and wrote past its buffers).
+extern "system" fn dispatch_x(this: This, x: u32, y: u32, z: u32, flags: u32) {
     #[cfg(windows)]
-    state::dispatch(this, x, y, z);
+    {
+        count_dispatch();
+        with_state(this, |list, s| s.dispatch_flags(list, x, y, z, Some(flags)));
+    }
     #[cfg(not(windows))]
     {
-        let _ = (this, x, y, z);
+        let _ = (this, x, y, z, flags);
         count_dispatch();
     }
 }

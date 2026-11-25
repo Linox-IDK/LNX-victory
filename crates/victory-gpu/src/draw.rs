@@ -2053,6 +2053,27 @@ impl State {
 
     /// Runs a dispatch on the host.
     pub(crate) fn dispatch(&mut self, list: &HostList, x: u32, y: u32, z: u32) {
+        self.dispatch_flags(list, x, y, z, None);
+    }
+
+    /// [`State::dispatch`] with the console's `DispatchX` flags.
+    pub(crate) fn dispatch_flags(&mut self, list: &HostList, x: u32, y: u32, z: u32, flags: Option<u32>) {
+        // Flag 0x20: the counts are of threads; the host dispatches groups.
+        let (x, y, z) = match flags {
+            Some(f) if f & 0x20 != 0 && thread_dispatch() => {
+                match crate::pipeline::compute_threads(self.pipeline as This) {
+                    Some([tx, ty, tz]) if tx > 0 && ty > 0 && tz > 0 => {
+                        once!(flags = f, threads = ?[x, y, z], size = ?[tx, ty, tz], "a dispatch by threads (DispatchX flag 0x20) runs as groups");
+                        (x.div_ceil(tx), y.div_ceil(ty), z.div_ceil(tz))
+                    }
+                    _ => {
+                        once!(flags = f, "a dispatch by threads whose group size is unknown runs as groups");
+                        (x, y, z)
+                    }
+                }
+            }
+            _ => (x, y, z),
+        };
         // It may write the arguments a window holds clamped.
         self.window = None;
         #[cfg(feature = "diagnostics")]
@@ -3498,4 +3519,10 @@ pub(crate) fn depth_bounds(list: &HostList, min: f32, max: f32) {
         // SAFETY: an open list on a device that supports depth bounds.
         unsafe { l1.OMSetDepthBounds(min, max) };
     }
+}
+
+/// `VICTORY_THREAD_DISPATCH` (on unless `0`): `DispatchX` with flag 0x20 counts threads.
+fn thread_dispatch() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_THREAD_DISPATCH").is_none_or(|v| v != "0"))
 }
