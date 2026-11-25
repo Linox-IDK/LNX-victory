@@ -861,6 +861,8 @@ impl State {
             once!("a rectangle pipeline drawn with another topology");
         }
         if !self.bind(list, p, false) {
+            #[cfg(feature = "diagnostics")]
+            crate::pipeline::note_why("a draw whose bind failed".into());
             return false;
         }
         let l = &list.list;
@@ -894,6 +896,11 @@ impl State {
         if indexed {
             let v = self.index;
             let Some(shadow) = crate::shadow::find_any(v.address, u64::from(v.size)) else {
+                #[cfg(feature = "diagnostics")]
+                crate::pipeline::note_why(format!(
+                    "an indexed draw whose index buffer has no host copy (size {})",
+                    if v.address == 0 { "none".to_owned() } else { v.size.to_string() }
+                ));
                 return false;
             };
             shadow.refresh(list, v.address, u64::from(v.size));
@@ -1000,6 +1007,8 @@ impl State {
             STORES.set(true);
             if made.iter().any(|m| m.1 == u32::MAX) {
                 once!("a draw whose descriptor table found no free slots is dropped");
+                #[cfg(feature = "diagnostics")]
+                crate::pipeline::note_why("bind refused at draw.rs:1010 after:  m.1 == u32::MAX) ( once!('a draw whose descriptor table found no free slots is dropped');".into());
                 return false;
             }
             // What the shader stores through root views and raw addresses is
@@ -1010,6 +1019,8 @@ impl State {
             let memory = if t.host.root_srvs.contains(&victory_shader::emit::SLOT_MEMORY) {
                 let Some(ready) = self.memory_ready(list, compute, writes) else {
                     once!("a shader that reads title memory by address without a view heap to hold its views: the draw is dropped");
+                    #[cfg(feature = "diagnostics")]
+                    crate::pipeline::note_why("bind refused at draw.rs:1020 after: eads title memory by address without a view heap to hold its views: the draw is dropped');".into());
                     return false;
                 };
                 Some(ready)
@@ -1081,6 +1092,8 @@ impl State {
                         once!(slot, "a shader reads a root view the title did not set");
                         // A table left unset is undefined: a null view.
                         if tabled && !self.root_srv_table(list, None, param, compute, false) {
+                            #[cfg(feature = "diagnostics")]
+                            crate::pipeline::note_why("bind refused at draw.rs:1091 after: fined: a null view. if tabled && !self.root_srv_table(list, None, param, compute, false) (".into());
                             return false;
                         }
                         continue;
@@ -1093,6 +1106,8 @@ impl State {
                         });
                     if tabled {
                         if !self.root_srv_table(list, Some(address), param, compute, biased) {
+                            #[cfg(feature = "diagnostics")]
+                            crate::pipeline::note_why("bind refused at draw.rs:1103 after: )); if tabled ( if !self.root_srv_table(list, Some(address), param, compute, biased) (".into());
                             return false;
                         }
                         continue;
@@ -1144,6 +1159,8 @@ impl State {
                     }
                 };
                 if !self.root_uav(list, address, param, compute, writes) {
+                    #[cfg(feature = "diagnostics")]
+                    crate::pipeline::note_why("bind refused at draw.rs:1154 after: ) ); if !self.root_uav(list, address, param, compute, writes) (".into());
                     return false;
                 }
             }

@@ -385,6 +385,27 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
         #[cfg(not(windows))]
         let words = |_: usize| None::<Vec<u64>>;
         let description = words(desc as usize);
+        // LNX: every (pointer, length) pair of the description saved whole,
+        // for working out the layout (`VICTORY_PSO_DUMP=<dir>`).
+        #[cfg(windows)]
+        if let (Some(w), Some(dir)) = (description.as_ref(), std::env::var_os("VICTORY_PSO_DUMP")) {
+            let dir = std::path::PathBuf::from(dir);
+            let _ = std::fs::create_dir_all(&dir);
+            let mut raw = [0u8; 128];
+            if crate::host::read_into(desc as *const u8, &mut raw) {
+                let _ = std::fs::write(dir.join(format!("{SLOT:x}_{calls}_desc.bin")), raw);
+            }
+            for k in 0..w.len().saturating_sub(1) {
+                let (at, len) = (w[k] as usize, w[k + 1] as usize);
+                if at < 0x1_0000 || len == 0 || len > 0x40000 {
+                    continue;
+                }
+                let mut bytes = vec![0u8; len];
+                if crate::host::read_into(at as *const u8, &mut bytes) {
+                    let _ = std::fs::write(dir.join(format!("{SLOT:x}_{calls}_w{k}_{at:x}_{len:x}.bin")), &bytes);
+                }
+            }
+        }
         let first = description
             .as_ref()
             .and_then(|w| words(w[0] as usize));
