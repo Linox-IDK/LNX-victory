@@ -47,6 +47,9 @@ pub const SLOT_STRIDES_COUNT: u32 = 1 << 21;
 pub const SLOT_MEMORY: u8 = 254;
 /// See [`SLOT_MEMORY`].
 pub const SLOT_FAULTS: u8 = 253;
+/// The root SRV of the host's ray-tracing structure (a top level built with
+/// the host's DXR, `VICTORY_NATIVE_BVH`) for inline ray queries.
+pub const SLOT_TLAS: u8 = 252;
 /// Entries of the [`SLOT_MEMORY`] directory: title addresses below 128 GiB.
 pub const MEMORY_PAGES: u32 = 1 << 21;
 /// Dwords of the [`SLOT_FAULTS`] buffer.
@@ -86,6 +89,8 @@ pub(crate) mod flags {
     pub const ATOMIC_HEAP64: u64 = 1 << 32;
     pub const RESOURCE_HEAP: u64 = 1 << 30;
     pub const SAMPLER_HEAP: u64 = 1 << 31;
+    /// AllocateRayQuery (inline ray tracing, tier 1.1).
+    pub const RAYTRACING_1_1: u64 = 1 << 25;
 }
 
 pub(crate) struct Types {
@@ -338,6 +343,111 @@ impl Shader {
         self.flags |= flags::RAW_BUFFERS;
         self.root_srvs.push((slot, h));
         h
+    }
+
+    /// The handle of the host ray-tracing structure ([`SLOT_TLAS`]).
+    #[allow(dead_code)] // used by the coming traversal rewrite
+    pub fn tlas_handle(&mut self) -> V {
+        if let Some(&(_, h)) = self.root_srvs.iter().find(|r| r.0 == SLOT_TLAS) {
+            return h;
+        }
+        let r = self.m.i32(u32::from(SLOT_TLAS));
+        let bind = [r, r, self.m.i32(ROOT_CBV_SPACE), self.m.i8(0)];
+        let bind = self.m.aggregate(self.t.bind, &bind);
+        let f = self.m.bool(false);
+        let block = self.entry;
+        let h = self.op(
+            block,
+            "createHandleFromBinding",
+            Attr::ReadNone,
+            self.t.handle,
+            217,
+            &[bind, r, f],
+        );
+        // Resource kind 16: RTAccelerationStructure.
+        let h = self.annotate(block, h, 16, 0);
+        self.flags |= flags::RAYTRACING_1_1;
+        self.root_srvs.push((SLOT_TLAS, h));
+        h
+    }
+
+    /// `AllocateRayQuery` with constant ray `flags`: a ray query's handle.
+    #[allow(dead_code)]
+    pub fn ray_query(&mut self, block: usize, flags: u32) -> V {
+        let f = self.m.i32(flags);
+        self.op(
+            block,
+            "allocateRayQuery",
+            Attr::NoUnwind,
+            self.t.i32,
+            178,
+            &[f],
+        )
+    }
+
+    /// `RayQuery_TraceRayInline`: starts `rq` on the host structure.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
+    pub fn trace_ray_inline(
+        &mut self,
+        block: usize,
+        rq: V,
+        flags: V,
+        mask: V,
+        origin: [V; 3],
+        tmin: V,
+        dir: [V; 3],
+        tmax: V,
+    ) {
+        let h = self.tlas_handle();
+        let args = [
+            rq, h, flags, mask, origin[0], origin[1], origin[2], tmin, dir[0], dir[1], dir[2], tmax,
+        ];
+        let void = self.t.void;
+        self.op(
+            block,
+            "rayQuery_TraceRayInline",
+            Attr::NoUnwind,
+            void,
+            179,
+            &args,
+        );
+    }
+
+    /// `RayQuery_Proceed`: whether a candidate needs the shader (never, for
+    /// opaque geometry and the flags we pass).
+    #[allow(dead_code)]
+    pub fn ray_query_proceed(&mut self, block: usize, rq: V) -> V {
+        let i1 = self.t.i1;
+        self.op(block, "rayQuery_Proceed.i1", Attr::NoUnwind, i1, 180, &[rq])
+    }
+
+    /// `RayQuery_CommittedStatus` (0 nothing, 1 triangle, 2 procedural).
+    #[allow(dead_code)]
+    pub fn ray_query_committed_status(&mut self, block: usize, rq: V) -> V {
+        let i32t = self.t.i32;
+        self.op(
+            block,
+            "rayQuery_StateScalar.i32",
+            Attr::ReadOnly,
+            i32t,
+            184,
+            &[rq],
+        )
+    }
+
+    /// `RayQuery_CommittedRayT`.
+    #[allow(dead_code)]
+    pub fn ray_query_committed_t(&mut self, block: usize, rq: V) -> V {
+        let f32t = self.t.f32;
+        self.op(
+            block,
+            "rayQuery_StateScalar.f32",
+            Attr::ReadOnly,
+            f32t,
+            200,
+            &[rq],
+        )
     }
 
     /// The handle of the root UAV (a raw buffer) of root parameter `slot`:
@@ -597,24 +707,42 @@ impl Shader {
                 let p = self.m.ptr(ty);
                 let u = self.m.undef(p);
                 let mut list = Vec::new();
+                let rtas = self
+                    .m
+                    .named_struct("struct.RaytracingAccelerationStructure", vec![self.t.i32]);
+                let rtas = self.m.ptr(rtas);
+                let rtas = self.m.undef(rtas);
                 for (n, (slot, _)) in self.root_srvs.clone().into_iter().enumerate() {
+                    // 16: a ray-tracing structure; 11: a raw buffer.
+                    let (var, shape) = if slot == SLOT_TLAS {
+                        (rtas, 16)
+                    } else {
+                        (u, 11)
+                    };
                     let ops = vec![
                         Some(i32c(&mut self, n as u32)),
-                        Some(self.m.md_value(u)),
+                        Some(self.m.md_value(var)),
                         Some(empty),
                         Some(i32c(&mut self, ROOT_CBV_SPACE)),
                         Some(i32c(&mut self, u32::from(slot))),
                         Some(i32c(&mut self, 1)),
-                        Some(i32c(&mut self, 11)),
+                        Some(i32c(&mut self, shape)),
                         Some(i32c(&mut self, 0)),
-                        None,
+                        // A ray-tracing structure: element type (tag 0) u32 (5).
+                        if slot == SLOT_TLAS {
+                            let tag = i32c(&mut self, 0);
+                            let u32k = i32c(&mut self, 5);
+                            Some(self.m.md_node(vec![Some(tag), Some(u32k)]))
+                        } else {
+                            None
+                        },
                     ];
                     list.push(Some(self.m.md_node(ops)));
                     bindings.push(Binding {
                         kind: 4,
                         space: ROOT_CBV_SPACE,
                         register: u32::from(slot),
-                        dxil_kind: 11,
+                        dxil_kind: shape,
                     });
                 }
                 srvs = Some(self.m.md_node(list));
@@ -884,6 +1012,10 @@ impl Shader {
         }
         if self.flags & flags::ATOMIC_HEAP64 != 0 {
             features |= 0x1000_0000;
+        }
+        // D3D_SHADER_FEATURE_RAYTRACING_TIER_1_1.
+        if self.flags & flags::RAYTRACING_1_1 != 0 {
+            features |= 0x10_0000;
         }
         let sfi0 = features.to_le_bytes();
         let isg1 = container::signature(&self.inputs, true);
