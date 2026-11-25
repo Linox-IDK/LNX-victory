@@ -32,6 +32,22 @@ pub(crate) const PROGRAM: &[u8] = b"CS_ScreenProbes_TemporalResolve";
 /// integers): root parameter and place in its table.
 pub(crate) const LIGHT: (u8, u32) = (1, 176);
 
+/// LNX: the resolve writes six such light images (table offsets 152, 160, 168, 176, 184,
+/// 200 of root parameter 1, all R32_UINT at the light's size: run cap3, 2026-11-25); skin
+/// stayed black with only 176 filled. `VICTORY_AMBIENT_SLOTS=152,160,...` names the ones
+/// filled (176 alone by default).
+pub(crate) fn light_slots() -> &'static [u32] {
+    static SLOTS: OnceLock<Vec<u32>> = OnceLock::new();
+    SLOTS.get_or_init(|| {
+        let v: Vec<u32> = std::env::var("VICTORY_AMBIENT_SLOTS")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        if v.is_empty() { vec![LIGHT.1] } else { v }
+    })
+}
+
 /// 0.6 looked balanced in run a2. `VICTORY_AMBIENT=off` leaves what the
 /// title's resolve wrote; 0 is no indirect diffuse light at all.
 const DEFAULT: f32 = 0.6;
@@ -355,13 +371,17 @@ unsafe impl Send for Pass {}
 unsafe impl Sync for Pass {}
 
 fn make(device: &ID3D12Device) -> windows::core::Result<Pass> {
+    make_from(device, SOURCE)
+}
+
+fn make_from(device: &ID3D12Device, source: &str) -> windows::core::Result<Pass> {
     let mut code: Option<ID3DBlob> = None;
     let mut errors: Option<ID3DBlob> = None;
     // SAFETY: the source and names live through the call; out pointers ours.
     let compiled = unsafe {
         D3DCompile(
-            SOURCE.as_ptr().cast(),
-            SOURCE.len(),
+            source.as_ptr().cast(),
+            source.len(),
             s!("ambient"),
             None,
             None,
@@ -427,6 +447,38 @@ fn uav_barrier(list: &ID3D12GraphicsCommandList) {
 /// are then ours).
 pub(crate) fn raise(list: &HostList, light: This, depth: Option<This>) -> bool {
     record(list, light, depth, 0.0)
+}
+
+/// LNX: skin (the `..._SSS` lighting shaders) reads the screen probes' radiance atlas
+/// itself (root parameter 0, table offset 968: R32_UINT, 7680x90 on Series S), which only
+/// the traced passes fill: black skin with every other surface lit. Before the first such
+/// draw of a frame the atlas gets the ambient light too, from the read state it is in and
+/// back (`VICTORY_SKIN_FILL=0`: not).
+pub(crate) const SKIN_ATLAS: (u8, u32) = (0, 968);
+
+pub(crate) fn skin_fill() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SKIN_FILL").is_none_or(|v| v != "0"))
+}
+
+/// [`raise`] for a texture a draw is about to read: to unordered access, filled, back.
+pub(crate) fn raise_read(list: &HostList, light: This) -> bool {
+    if let Some(t) = crate::resource::host_resource(light) {
+        // SAFETY: a live resource.
+        let d = unsafe { t.GetDesc() };
+        if d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0 {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| tracing::warn!(width = d.Width, height = d.Height, "skin: the atlas cannot be written (no unordered access)"));
+            return false;
+        }
+    }
+    const UAV: u32 = D3D12_RESOURCE_STATE_UNORDERED_ACCESS.0 as u32;
+    const READ: u32 = (D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0
+        | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0) as u32;
+    crate::list::ensure_state(list, light, UAV);
+    let done = record(list, light, None, 0.0);
+    crate::list::ensure_state(list, light, READ);
+    done
 }
 
 /// Holds the reflections in `image` to a part of the ambient light, in
@@ -571,4 +623,146 @@ mod tests {
         };
         super::make(&host.device).expect("the ambient pass");
     }
+}
+
+/// LNX: an array of light images (the probes' 13-layer array skin reads, root parameter 1,
+/// table offset 80: R32_UINT 160x90x13 on Series S) set to the ambient light: every layer
+/// (`VICTORY_SKIN_LAYERS=all`) or the first alone, the others 0 (`first`, the default: a
+/// spherical-harmonic set's constant term), or left (`off`).
+pub(crate) const SKIN_LAYERS: (u8, u32) = (1, 80);
+
+const ARRAY_SOURCE: &str = r#"
+#define RS "RootConstants(num32BitConstants=2, b0), DescriptorTable(UAV(u0))"
+cbuffer Fill : register(b0) { uint value; uint first_only; };
+RWTexture2DArray<uint> layers : register(u0);
+[RootSignature(RS)]
+[numthreads(8, 8, 1)]
+void main(uint3 at : SV_DispatchThreadID) {
+    uint w, h, n;
+    layers.GetDimensions(w, h, n);
+    if (at.x >= w || at.y >= h || at.z >= n) return;
+    layers[at] = (first_only == 0 || at.z == 0) ? value : 0u;
+}
+"#;
+
+/// [`ARRAY_SOURCE`] for a 3D texture.
+const VOLUME_SOURCE: &str = r#"
+#define RS "RootConstants(num32BitConstants=2, b0), DescriptorTable(UAV(u0))"
+cbuffer Fill : register(b0) { uint value; uint first_only; };
+RWTexture3D<uint> layers : register(u0);
+[RootSignature(RS)]
+[numthreads(8, 8, 1)]
+void main(uint3 at : SV_DispatchThreadID) {
+    uint w, h, n;
+    layers.GetDimensions(w, h, n);
+    if (at.x >= w || at.y >= h || at.z >= n) return;
+    layers[at] = (first_only == 0 || at.z == 0) ? value : 0u;
+}
+"#;
+
+/// The mode of [`SKIN_LAYERS`]: `Some(first_only)`, or `None` when off.
+pub(crate) fn skin_layers() -> Option<bool> {
+    static MODE: OnceLock<Option<bool>> = OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("VICTORY_SKIN_LAYERS").unwrap_or_default().trim() {
+        "off" => None,
+        "all" => Some(false),
+        _ => Some(true),
+    })
+}
+
+/// R9G9B9E5 of `c` as the shader packs it.
+fn pack(c: [f32; 3]) -> u32 {
+    let c = c.map(|v| v.clamp(0.0, 65408.0));
+    let most = c[0].max(c[1]).max(c[2]);
+    let mut e = ((most.max(1e-9)).log2().floor() as i32 + 16).clamp(0, 31);
+    let mut scale = 2f32.powi(24 - e);
+    if most * scale >= 511.5 {
+        e = (e + 1).min(31);
+        scale = 2f32.powi(24 - e);
+    }
+    let m = c.map(|v| ((v * scale + 0.5) as u32).min(511));
+    m[0] | m[1] << 9 | m[2] << 18 | (e as u32) << 27
+}
+
+/// The layers of `array` (a texture a draw is about to read) set as [`skin_layers`] says:
+/// to unordered access, filled, back. Whether it recorded anything.
+pub(crate) fn fill_layers(list: &HostList, array: This, first_only: bool) -> bool {
+    let (Some(level), Some(host)) = (level(), host()) else {
+        return false;
+    };
+    let Some(t) = crate::resource::host_resource(array) else {
+        return false;
+    };
+    // SAFETY: a live resource.
+    let d = unsafe { t.GetDesc() };
+    if d.Format != DXGI_FORMAT_R32_UINT || d.DepthOrArraySize < 2 {
+        return false;
+    }
+    if d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0 {
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| tracing::warn!(width = d.Width, height = d.Height, layers = d.DepthOrArraySize, "skin: the probes' layers cannot be written (no unordered access)"));
+        return false;
+    }
+    let volume = d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    static PASS: OnceLock<Option<Pass>> = OnceLock::new();
+    static VOLUME: OnceLock<Option<Pass>> = OnceLock::new();
+    let (cell, source) = if volume { (&VOLUME, VOLUME_SOURCE) } else { (&PASS, ARRAY_SOURCE) };
+    let Some(pass) = cell
+        .get_or_init(|| make_from(&host.device, source).inspect_err(|e| tracing::warn!(error = %e, "no skin layers")).ok())
+        .as_ref()
+    else {
+        return false;
+    };
+    const UAV: u32 = D3D12_RESOURCE_STATE_UNORDERED_ACCESS.0 as u32;
+    const READ: u32 = (D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0
+        | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0) as u32;
+    crate::list::ensure_state(list, array, UAV);
+    list.keep(t);
+    let slot = pass.next.fetch_add(1, Ordering::Relaxed) % (SLOTS * 3);
+    let [r, g, b] = tint();
+    let level = live_level().unwrap_or(level);
+    let value = pack([r * level, g * level, b * level]);
+    let l = &list.list;
+    // SAFETY: an open list; a live texture the list keeps, in the unordered-access
+    // state; a view in a slot no list in flight reads.
+    unsafe {
+        let cpu = pass.views.GetCPUDescriptorHandleForHeapStart();
+        let gpu = pass.views.GetGPUDescriptorHandleForHeapStart();
+        let at = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: cpu.ptr + (slot * pass.step) as usize };
+        let view = if volume {
+            D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                Format: DXGI_FORMAT_R32_UINT,
+                ViewDimension: D3D12_UAV_DIMENSION_TEXTURE3D,
+                Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                    Texture3D: D3D12_TEX3D_UAV { MipSlice: 0, FirstWSlice: 0, WSize: u32::from(d.DepthOrArraySize) },
+                },
+            }
+        } else {
+            D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                Format: DXGI_FORMAT_R32_UINT,
+                ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2DARRAY,
+                Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                    Texture2DArray: D3D12_TEX2D_ARRAY_UAV {
+                        MipSlice: 0,
+                        FirstArraySlice: 0,
+                        ArraySize: u32::from(d.DepthOrArraySize),
+                        PlaneSlice: 0,
+                    },
+                },
+            }
+        };
+        host.device.CreateUnorderedAccessView(t, None::<&ID3D12Resource>, Some(&view), at);
+        l.SetDescriptorHeaps(&[Some(pass.views.clone())]);
+        l.SetComputeRootSignature(&pass.root);
+        l.SetPipelineState(&pass.pso);
+        let constants = [value, u32::from(first_only)];
+        l.SetComputeRoot32BitConstants(0, 2, constants.as_ptr().cast(), 0);
+        l.SetComputeRootDescriptorTable(1, D3D12_GPU_DESCRIPTOR_HANDLE { ptr: gpu.ptr + u64::from(slot * pass.step) });
+        l.Dispatch((d.Width as u32).div_ceil(8), d.Height.div_ceil(8), u32::from(d.DepthOrArraySize));
+    }
+    uav_barrier(l);
+    crate::list::ensure_state(list, array, READ);
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| tracing::info!(first_only, volume, layers = d.DepthOrArraySize, "skin: the probes' layers get the ambient light"));
+    true
 }

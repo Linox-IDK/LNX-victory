@@ -105,6 +105,12 @@ it can and on first use where it must (shaders). See
 [docs/architecture.md](docs/architecture.md).
 
 
+## Status (2026-11-25, LNX-victory)
+
+- Series S + host FSR: 7-8 fps on an RTX 5060 Ti 8 GB, GPU ~66% busy (CPU-side bound).
+- NPC faces lit by the skin fill; player skin still black; ambient 0.6 makes the fog glow
+  (0.25 clears the haze but skin goes dark): separate fog and skin levels next.
+
 ## Status (2026-11-24, LNX-victory)
 
 **Not playable yet, but the world renders.** The title boots, runs its menus
@@ -229,6 +235,10 @@ info and above).
 | `VICTORY_PIPELINE_PRIORITY=normal` | builders at normal priority (below normal, a busy title starves them) |
 | `VICTORY_RGB9E5_AS_R11=1` | name R9G9B9E5 as R11G11B10 (Series S render targets on NVIDIA; breaks the title's packed light) |
 | `VICTORY_PRESENT_PLANE=<n>` | show plane `n` alone; unset, two planes are composed (Series S) |
+| `VICTORY_SKIN_FILL=0` | don't fill skin's probe inputs (radiance atlas, 13-layer volume) with the ambient light before skin draws |
+| `VICTORY_SKIN_LAYERS=first\|all\|off` | which layers of skin's probe volume get the light (`all` lights NPC faces) |
+| `VICTORY_SKIN_WIDE=1` | also fill for `SKIN`-named materials (player skin; makes them see-through for now) |
+| `VICTORY_SKIN_AT_DRAW=0` | fill at the light resolve instead of before the draws (skin stays black: overwritten later) |
 | `VICTORY_GAMMA=<g>` | raise the presented image to 1/g (costs a submission; washes bright scenes) |
 | `VICTORY_LDS_REGION_RACE=1` | LDS read and written in one lane branch taken as two 32-lane waves (shadow and ray-tracing programs on NVIDIA; approximate) |
 | `VICTORY_BALLOT_OWN=1` | experimental: ballots and wave reductions in lane branches use each 32-lane half's own lanes (cascade shadows and water translate, but shadows come out striped) |

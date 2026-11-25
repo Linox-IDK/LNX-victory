@@ -868,11 +868,21 @@ impl State {
             // Its geometry stage would turn each triangle into a rectangle.
             once!("a rectangle pipeline drawn with another topology");
         }
+        // Skin reads the probes' radiance atlas, which only rays fill: the ambient
+        // light goes there before the frame's first skin lighting draw.
+        if crate::ambient::skin_fill()
+            && crate::ambient::level().is_some()
+            && p.stages.iter().any(|s| skin_stage(&s))
+        {
+            self.skin_atlas(list, p);
+        }
         if !self.bind(list, p, false) {
             #[cfg(feature = "diagnostics")]
             crate::pipeline::note_why("a draw whose bind failed".into());
             return false;
         }
+        #[cfg(feature = "diagnostics")]
+        self.list_program_views(p, false);
         // The sky as the title reflects it: the ambient light can follow it.
         if p.stages.iter().any(|s| s.shader.draws_sky)
             && let Some(&sky) = self.targets.first()
@@ -2134,13 +2144,131 @@ impl State {
         #[cfg(feature = "diagnostics")]
         list.note_op(|| self.op_text(format!("dispatch {x}x{y}x{z}"), true));
         // SAFETY: an open list with everything set.
+        #[cfg(feature = "diagnostics")]
+        self.list_program_views(p, true);
         unsafe { list.list.Dispatch(x, y, z) };
         // Later dispatches run whole groups (the word is set again at their bind).
         self.dispatch_threads_x = 0;
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
         // The least indirect light after the program that resolves it; then
         // the title's state goes back on the list.
-        if self.ambient(list, p) {
+        let mut again = self.ambient(list, p);
+        if again && !skin_at_draw() {
+            again |= skin_fill_seen(list);
+        }
+        if again {
+            self.replay(list);
+        }
+    }
+
+    /// `VICTORY_LIST_PROGRAMS=name,name` (diagnostics): the first dispatch of a
+    /// program whose container names one of them logs every view its tables
+    /// give it (kind, place, format, size).
+    #[cfg(feature = "diagnostics")]
+    fn list_program_views(&self, p: &crate::pipeline::host::HostPipeline, compute: bool) {
+        static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        static DONE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let names = NAMES.get_or_init(|| {
+            std::env::var("VICTORY_LIST_PROGRAMS").unwrap_or_default().split(',')
+                .map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect()
+        });
+        for stage in &p.stages {
+        for name in names {
+            if !stage.shader.names(name.as_bytes()) { continue }
+            let key = format!("{name} {}", stage.shader.hash);
+            {
+                let mut done = DONE.lock().unwrap_or_else(|e| e.into_inner());
+                if done.contains(&key) { continue }
+                done.push(key);
+            }
+            for u in stage.translated().used.iter().filter(|u| u.root == RootType::Table) {
+                let Some(Root::Table(table)) = self.roots_ref(compute).get(usize::from(u.slot)) else { continue };
+                let r = match crate::descriptor::view(table + u64::from(u.table_offset_dwords) * 4) {
+                    Some(View::Shader(r, _)) | Some(View::Unordered(r, ..)) => r,
+                    _ => continue,
+                };
+                let Some(t) = crate::resource::host_resource(r as This) else { continue };
+                // SAFETY: a live resource.
+                let d = unsafe { t.GetDesc() };
+                tracing::info!(
+                    program = %name, hash = %stage.shader.hash, kind = ?u.kind, slot = u.slot,
+                    offset = u.table_offset_dwords, format = d.Format.0, width = d.Width,
+                    height = d.Height, depth = d.DepthOrArraySize,
+                    "LISTED program view"
+                );
+            }
+        }
+        }
+    }
+
+    /// The ambient light in the probes' radiance atlas a skin draw of `p` reads, once a
+    /// frame per atlas ([`crate::ambient::SKIN_ATLAS`]); the title's state goes back on
+    /// the list after.
+    fn skin_atlas(&mut self, list: &HostList, p: &crate::pipeline::host::HostPipeline) {
+        static FILLED: std::sync::Mutex<(u64, Vec<usize>)> = std::sync::Mutex::new((u64::MAX, Vec::new()));
+        let Some(stage) = p.stages.iter().find(|s| skin_stage(s)) else {
+            return;
+        };
+        let (slot, offset) = crate::ambient::SKIN_ATLAS;
+        let Some(u) = stage.translated().used.iter().find(|u| {
+            u.kind == ResourceType::Srv && u.root == RootType::Table && (u.slot, u.table_offset_dwords) == (slot, offset)
+        }) else {
+            return;
+        };
+        let Some(Root::Table(table)) = self.roots_ref(false).get(usize::from(u.slot)).cloned() else {
+            return;
+        };
+        let atlas = match crate::descriptor::view(table + u64::from(u.table_offset_dwords) * 4) {
+            Some(View::Shader(r, _)) if r != 0 => r,
+            _ => return,
+        };
+        {
+            let frame = crate::queue::presented();
+            let mut f = FILLED.lock().unwrap_or_else(|e| e.into_inner());
+            if f.0 != frame {
+                *f = (frame, Vec::new());
+            }
+            if f.1.contains(&atlas) {
+                return;
+            }
+            f.1.push(atlas);
+        }
+        // Default: remember them and fill at the next light-resolve dispatch, outside
+        // any draw pass (filling between draws left the player's skin draws see-through).
+        // `VICTORY_SKIN_AT_DRAW=1` fills here as before.
+        if !skin_at_draw() {
+            let (ls, lo) = crate::ambient::SKIN_LAYERS;
+            let volume = match self.roots_ref(false).get(usize::from(ls)).cloned() {
+                Some(Root::Table(t2)) => match crate::descriptor::view(t2 + u64::from(lo) * 4) {
+                    Some(View::Shader(r, _)) if r != 0 => r,
+                    _ => 0,
+                },
+                _ => 0,
+            };
+            let mut seen = SKIN_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+            if !seen.contains(&(atlas, volume)) {
+                seen.push((atlas, volume));
+            }
+            return;
+        }
+        // The 13-layer array beside it ([`crate::ambient::SKIN_LAYERS`]).
+        let mut layered = false;
+        if let Some(first_only) = crate::ambient::skin_layers() {
+            let (ls, lo) = crate::ambient::SKIN_LAYERS;
+            if let Some(Root::Table(t2)) = self.roots_ref(false).get(usize::from(ls)).cloned()
+                && stage.translated().used.iter().any(|u| u.kind == ResourceType::Srv && u.root == RootType::Table && (u.slot, u.table_offset_dwords) == (ls, lo))
+                && let Some(View::Shader(r, _)) = crate::descriptor::view(t2 + u64::from(lo) * 4)
+                && r != 0
+            {
+                layered = crate::ambient::fill_layers(list, r as This, first_only);
+            }
+        }
+        if layered {
+            self.replay(list);
+        }
+        if crate::ambient::raise_read(list, atlas as This) {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| tracing::info!("skin: the probes' radiance atlas gets the ambient light"));
             self.replay(list);
         }
     }
@@ -2173,19 +2301,23 @@ impl State {
                 _ => false,
             };
         }
-        let light = match view(ResourceType::Uav, crate::ambient::LIGHT) {
-            Some(View::Unordered(r, ..)) => r,
-            _ => 0,
-        };
-        if light == 0 {
-            once!("no ambient light: other tables");
-            return false;
-        }
         let depth = match view(ResourceType::Srv, crate::ambient::DEPTH) {
             Some(View::Shader(r, _)) => Some(r as This),
             _ => None,
         };
-        crate::ambient::raise(list, light as This, depth)
+        let mut raised = false;
+        for &offset in crate::ambient::light_slots() {
+            let light = match view(ResourceType::Uav, (crate::ambient::LIGHT.0, offset)) {
+                Some(View::Unordered(r, ..)) => r,
+                _ => 0,
+            };
+            if light == 0 {
+                once!(offset, "no ambient light: other tables");
+                continue;
+            }
+            raised |= crate::ambient::raise(list, light as This, depth);
+        }
+        raised
     }
 
     /// What a draw or dispatch runs, for the device-removed report
@@ -3542,4 +3674,53 @@ pub(crate) fn depth_bounds(list: &HostList, min: f32, max: f32) {
 fn thread_dispatch() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_THREAD_DISPATCH").is_none_or(|v| v != "0"))
+}
+
+/// A skin lighting stage: named for skin (`_SSS` materials or the player's `SKIN`
+/// materials) and reading both probe inputs ([`crate::ambient::SKIN_ATLAS`],
+/// [`crate::ambient::SKIN_LAYERS`]), so screen-space skin passes are left out.
+fn skin_stage(s: &&crate::pipeline::host::Stage) -> bool {
+    if !(s.shader.names(b"MATERIAL_SHEEN_ANISOTROPY_SSS") || (skin_wide() && s.shader.names(b"SKIN"))) {
+        return false;
+    }
+    let reads = |(slot, off): (u8, u32)| {
+        s.translated().used.iter().any(|u| {
+            u.kind == ResourceType::Srv && u.root == RootType::Table && (u.slot, u.table_offset_dwords) == (slot, off)
+        })
+    };
+    reads(crate::ambient::SKIN_ATLAS) && reads(crate::ambient::SKIN_LAYERS)
+}
+
+/// `VICTORY_SKIN_AT_DRAW=1`: fill skin's probe inputs right before its draws.
+fn skin_at_draw() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SKIN_AT_DRAW").is_none_or(|v| v != "0"))
+}
+
+/// Skin's probe inputs seen at its draws: (radiance atlas, layer volume or 0).
+static SKIN_SEEN: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
+
+/// After the light resolve: fill every skin probe input seen so far (once a frame).
+fn skin_fill_seen(list: &HostList) -> bool {
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+    let frame = crate::queue::presented();
+    if LAST.swap(frame, std::sync::atomic::Ordering::Relaxed) == frame {
+        return false;
+    }
+    let seen = std::mem::take(&mut *SKIN_SEEN.lock().unwrap_or_else(|e| e.into_inner()));
+    let mut any = false;
+    for (atlas, volume) in seen {
+        if volume != 0 && let Some(first_only) = crate::ambient::skin_layers() {
+            any |= crate::ambient::fill_layers(list, volume as This, first_only);
+        }
+        any |= crate::ambient::raise_read(list, atlas as This);
+    }
+    any
+}
+
+/// `VICTORY_SKIN_WIDE=1`: also fill for the player's `SKIN` materials (left them
+/// see-through when filled at their draws; off by default).
+fn skin_wide() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SKIN_WIDE").is_some_and(|v| v == "1"))
 }

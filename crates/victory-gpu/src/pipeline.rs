@@ -76,6 +76,14 @@ pub(crate) struct Shader {
     translated: OnceLock<Option<Translated>>,
 }
 
+#[cfg(windows)]
+impl Shader {
+    /// Whether its container names `text` (a program name, say).
+    pub(crate) fn names(&self, text: &[u8]) -> bool {
+        !text.is_empty() && self.container.windows(text.len()).any(|w| w == text)
+    }
+}
+
 impl std::fmt::Debug for Shader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} {}", self.stage, self.hash)
