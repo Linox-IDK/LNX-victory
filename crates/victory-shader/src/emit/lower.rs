@@ -7452,22 +7452,10 @@ impl<'a> Lower<'a> {
                 let Some(Operand::Vector { reg, .. }) = v.dst else {
                     return Err("a mixed-precision result");
                 };
-                let old = match inst.read(Reg::V(reg)) {
-                    Some(o) => self.i32_of(o)?,
-                    None => self.s.m.i32(0),
-                };
                 let h = self
                     .s
                     .op(c, "legacyF32ToF16", Attr::ReadNone, self.s.t.i32, 130, &[r]);
-                let (keep, h) = if name == "v_fma_mixhi_f16" {
-                    let k16 = self.s.m.i32(16);
-                    (0xFFFF, self.s.m.bin(c, Bin::Shl, h, k16))
-                } else {
-                    (0xFFFF_0000, h)
-                };
-                let keep = self.s.m.i32(keep);
-                let old = self.s.m.bin(c, Bin::And, old, keep);
-                let x = self.s.m.bin(c, Bin::Or, old, h);
+                let x = self.place_half(inst, reg, name == "v_fma_mixhi_f16", true, h);
                 self.write(inst, Reg::V(reg), x, guard);
                 Ok(())
             }
@@ -7845,6 +7833,28 @@ impl<'a> Lower<'a> {
         Ok(f)
     }
 
+    /// Places the low 16 bits of `x` into `reg`'s low or `high` half; when
+    /// `keep` is set, preserves the other half (treating an unlowered prior
+    /// register value as 0).
+    fn place_half(&mut self, inst: &Inst, reg: u8, high: bool, keep: bool, x: V) -> V {
+        let c = self.cur;
+        let old = match inst.read(Reg::V(reg)).map(|o| self.i32_of(o)) {
+            Some(Ok(o)) if keep => o,
+            _ => self.s.m.i32(0),
+        };
+        let (k16, low) = (self.s.m.i32(16), self.s.m.i32(0xFFFF));
+        let x = self.s.m.bin(c, Bin::And, x, low);
+        if high {
+            let o = self.s.m.bin(c, Bin::And, old, low);
+            let x = self.s.m.bin(c, Bin::Shl, x, k16);
+            self.s.m.bin(c, Bin::Or, o, x)
+        } else {
+            let other = self.s.m.i32(0xFFFF_0000);
+            let o = self.s.m.bin(c, Bin::And, old, other);
+            self.s.m.bin(c, Bin::Or, o, x)
+        }
+    }
+
     /// Writes a 16-bit result (low bits of `x`) into the destination's low
     /// half, or its high half with op_sel bit 3 (or an SDWA WORD_1 select);
     /// the other half is kept (GFX10).
@@ -7868,22 +7878,7 @@ impl<'a> Lower<'a> {
                 _ => return Err("an SDWA destination of a 16-bit operation"),
             }
         }
-        let c = self.cur;
-        let old = match inst.read(Reg::V(reg)).map(|o| self.i32_of(o)) {
-            Some(Ok(o)) if keep => o,
-            _ => self.s.m.i32(0),
-        };
-        let (k16, low) = (self.s.m.i32(16), self.s.m.i32(0xFFFF));
-        let x = self.s.m.bin(c, Bin::And, x, low);
-        let r = if high {
-            let o = self.s.m.bin(c, Bin::And, old, low);
-            let x = self.s.m.bin(c, Bin::Shl, x, k16);
-            self.s.m.bin(c, Bin::Or, o, x)
-        } else {
-            let keep = self.s.m.i32(0xFFFF_0000);
-            let o = self.s.m.bin(c, Bin::And, old, keep);
-            self.s.m.bin(c, Bin::Or, o, x)
-        };
+        let r = self.place_half(inst, reg, high, keep, x);
         self.write_placed(inst, Reg::V(reg), r, guard);
         Ok(())
     }
@@ -9358,15 +9353,7 @@ impl<'a> Lower<'a> {
     /// `x` (an f16 in the low bits) as the low half of VGPR `reg`: 16-bit
     /// results keep the register's high half (GFX10).
     fn low_half(&mut self, inst: &Inst, reg: u8, x: V) -> V {
-        let c = self.cur;
-        let old = match inst.read(Reg::V(reg)).map(|o| self.i32_of(o)) {
-            Some(Ok(o)) => o,
-            _ => self.s.m.i32(0),
-        };
-        let (high, low) = (self.s.m.i32(0xFFFF_0000), self.s.m.i32(0xFFFF));
-        let old = self.s.m.bin(c, Bin::And, old, high);
-        let x = self.s.m.bin(c, Bin::And, x, low);
-        self.s.m.bin(c, Bin::Or, old, x)
+        self.place_half(inst, reg, false, true, x)
     }
 
     fn image(&mut self, inst: &Inst, b: usize, i: usize) -> Result<(), Why> {

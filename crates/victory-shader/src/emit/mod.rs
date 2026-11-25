@@ -1740,4 +1740,71 @@ mod barycentric_tests {
         let words = [0xC812_0000, e0, e1, S_ENDPGM];
         assert!(pixel(&words, PERSP_CENTER).is_err());
     }
+
+    /// Reusing a `v_interp_p1ll_f16` destination register for `v_fma_mixlo_f16`
+    /// or `v_fma_mixhi_f16` keeps its other half as 0 rather than carrying the
+    /// placeholder `"the first half of an interpolation"` value forward.
+    #[test]
+    fn mixed_f16_write_over_interp_first_half_lowers_and_validates() {
+        let [e0, e1] = exp_mrt0(2);
+        let words = [
+            0xD742_0002,
+            0x0002_0000, // v_interp_p1ll_f16 v2, v0, attr0.x
+            0xD75A_0004,
+            0x040A_0200, // v_interp_p2_f16 v4, v1, attr0.x, v2
+            0xD742_0003,
+            0x0002_0000, // v_interp_p1ll_f16 v3, v0, attr0.x
+            0xD75A_0005,
+            0x040E_0200, // v_interp_p2_f16 v5, v1, attr0.x, v3
+            0xCC21_0002,
+            0x0201_E4F2, // v_fma_mixlo_f16 v2, 1.0, 1.0, 0
+            0xCC22_0003,
+            0x0201_E4F2, // v_fma_mixhi_f16 v3, 1.0, 1.0, 0
+            0x7E04_1702, // v_cvt_f32_f16 v2, v2
+            0x7E06_1703, // v_cvt_f32_f16 v3, v3
+            v_add_f32(2, 2, 3),
+            v_add_f32(2, 2, 4),
+            v_add_f32(2, 2, 5),
+            e0,
+            e1,
+            S_ENDPGM,
+        ];
+        let native = NativeProgram {
+            stage: HwStage::Ps,
+            wave64: false,
+            vgprs: 8,
+            layout: vec![],
+            used: vec![],
+            io: StageIo::Ps {
+                inputs: vec![PsInput {
+                    usage: Usage::Generic,
+                    row: 0,
+                    mask: 0b1111,
+                    attr: 0,
+                    flat: false,
+                    fp16: true,
+                    pack2: false,
+                    row2: 0,
+                }],
+                input_addr: PERSP_CENTER,
+                db_shader_control: 0,
+                patches: vec![],
+            },
+            code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        };
+        let mut inp = element("TEXCOORD", 0, 0);
+        inp.half = true;
+        let mut target = element("SV_Target", 16, 0);
+        target.usage = 15;
+        let isg1 = container::signature(&[inp], true);
+        let osg1 = container::signature(&[target], false);
+        let bytes = crate::dxbc::build(&[(FourCC::ISG1, &isg1), (FourCC::OSG1, &osg1)]);
+        let c = Container::parse(&bytes).unwrap();
+        let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
+        let res = resource::track(&p, &native.layout, native.stage, None).unwrap();
+        let io = io::raise(&p, &native).unwrap();
+        let st = structure::structure(&p).unwrap();
+        let shader = emit(&c, &native, &p, &st, &io, &res).unwrap();
+        validate(&shader);
+    }
 }
