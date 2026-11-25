@@ -269,6 +269,17 @@ struct Lower<'a> {
     clane: Option<V>,
     /// The first exchange dword of this thread's console wave ([`Self::exchange_pair`]).
     pair: Option<V>,
+    /// `VICTORY_LANE_HANDSHAKE=1`: the first LDS dword of the handshake area (see
+    /// [`Lower::hs_exchange`]), the sites used so far, and this thread's console wave's
+    /// area (made in the entry block).
+    hs: Option<u32>,
+    hs_sites: u32,
+    hs_wave: Option<(V, V)>,
+    /// Per IR block: the header of the one loop of its lane-branch region, and the first
+    /// blocks of that region after the loop ([`Lower::hs_plan`]).
+    hs_head: Vec<bool>,
+    hs_out: Vec<bool>,
+    hs_planned: bool,
     /// With `exchange`: the first of 64 table dwords per console wave, past the exchange dwords,
     /// where each console lane's dword goes for the lane permutes (the backward read, the
     /// forward write).
@@ -851,6 +862,20 @@ fn meeting_mode() -> u32 {
 /// two host waves of 32, ballots and wave reductions take this host wave's own lanes alone
 /// instead of being refused. Exact for the usual use there (each half counts, elects a first
 /// lane and adds its share with an atomic: the shares add up to the wave's).
+/// Handshake sites per program ([`Lower::hs_exchange`]).
+const HS_SITES: u32 = 16;
+/// Handshake dwords per console wave: two progress dwords, then per site and round
+/// parity two values and two tags.
+const HS_WAVE: u32 = 2 + 8 * HS_SITES;
+
+/// `VICTORY_LANE_HANDSHAKE=1` (LNX, off by default): a console wave run as two host
+/// waves of 32 exchanges ballots and any-lane answers inside lane branches without a
+/// barrier ([`Lower::hs_exchange`]).
+fn lane_handshake() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_LANE_HANDSHAKE").is_some_and(|v| v == "1"))
+}
+
 fn ballot_own() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_BALLOT_OWN").is_some_and(|v| v == "1"))
@@ -1571,6 +1596,7 @@ impl<'a> Lower<'a> {
         let mut lds_meet: Option<(Vec<bool>, Vec<(bool, bool)>)> = None;
         // a console wave64 program in two host waves of 32 (`exchange`)
         let mut exchange: Option<(u32, bool, Vec<bool>)> = None;
+        let mut hs: Option<u32> = None;
         // with `exchange`, a lane permute in the program and a group over 32 threads: the first
         // of 64 table dwords per console wave (the permutes' lowering)
         let mut permute_table: Option<u32> = None;
@@ -1657,6 +1683,10 @@ impl<'a> Lower<'a> {
                                 // numbers go through two exchange dwords past the program's LDS
                                 exchange = Some((s.lds_dwords, group <= 32, all));
                                 s.lds_dwords += 2 * group.div_ceil(64);
+                                if group > 32 && lane_handshake() {
+                                    hs = Some(s.lds_dwords);
+                                    s.lds_dwords += HS_WAVE * group.div_ceil(64);
+                                }
                                 // `ds_(b)permute_b32`: any lane may exchange a dword with any
                                 // console lane, both halves'. Each console wave of the group gets
                                 // 64 table dwords past the exchange dwords, one per console lane
@@ -1885,6 +1915,12 @@ impl<'a> Lower<'a> {
             exchange,
             clane: None,
             pair: None,
+            hs,
+            hs_sites: 0,
+            hs_wave: None,
+            hs_head: Vec::new(),
+            hs_out: Vec::new(),
+            hs_planned: false,
             permute_table,
             halves,
             wave_base: None,
@@ -2586,6 +2622,18 @@ impl<'a> Lower<'a> {
             if self.lds_meet.as_ref().is_some_and(|(_, meet)| meet[b].0) {
                 self.lds_meeting();
             }
+            if self.hs.is_some() {
+                if !self.hs_planned {
+                    self.hs_plan();
+                }
+                if self.all_lanes(b) {
+                    self.hs_done();
+                } else if self.hs_head.get(b).copied().unwrap_or(false) {
+                    self.hs_round();
+                } else if self.hs_out.get(b).copied().unwrap_or(false) {
+                    self.hs_left_loop();
+                }
+            }
             let mut i = 0;
             while i < p.blocks[b].insts.len() {
                 self.inst(b, i)?;
@@ -2601,6 +2649,9 @@ impl<'a> Lower<'a> {
             self.mask_ok = self.mask_data == MaskData::Console;
             if self.lds_meet.as_ref().is_some_and(|(_, meet)| meet[b].1) {
                 self.lds_meeting();
+            }
+            if self.hs.is_some() && self.all_lanes(b) && self.into_lane_branch(b) {
+                self.hs_reset();
             }
             self.tail[b] = Some(self.cur);
             self.exit(b)?;
@@ -3499,9 +3550,13 @@ impl<'a> Lower<'a> {
                         // work out, each lane's place among the set ones): each half then does
                         // that for its own lanes, and both halves' work adds up to the wave's.
                         if !ballot_own() {
-                            need(b.unwrap_or(0));
-                            return Err("a lane mask exchanged where not every lane runs");
-                        }
+                            if let Some(xy2) = self.hs_exchange(at, xy.0)? {
+                                own = Some(xy2);
+                            } else {
+                                need(b.unwrap_or(0));
+                                return Err("a lane mask exchanged where not every lane runs");
+                            }
+                        } else {
                         let cl = self.console_lane();
                         let k32 = self.s.m.i32(32);
                         let upper = self.s.m.cmp(at, pred::IUGE, cl, k32);
@@ -3509,6 +3564,7 @@ impl<'a> Lower<'a> {
                         let own_lo = self.s.m.select(at, upper, z, xy.0);
                         let own_hi = self.s.m.select(at, upper, xy.0, z);
                         own = Some((own_lo, own_hi));
+                        }
                     }
                     xy = match own {
                         Some(o) => o,
@@ -4368,6 +4424,256 @@ impl<'a> Lower<'a> {
         (lo, hi)
     }
 
+    /// This thread's console wave's handshake area and its half (0 or 1), made in the
+    /// entry block.
+    fn hs_area(&mut self) -> (V, V) {
+        if let Some(v) = self.hs_wave {
+            return v;
+        }
+        let e = self.s.entry;
+        let thread = self.console_thread();
+        let six = self.s.m.i32(6);
+        let wave = self.s.m.bin(e, Bin::LShr, thread, six);
+        let per = self.s.m.i32(HS_WAVE);
+        let off = self.s.m.bin(e, Bin::Mul, wave, per);
+        let first = self.s.m.i32(self.hs.unwrap_or(0));
+        let base = self.s.m.bin(e, Bin::Add, first, off);
+        let cl = self.console_lane();
+        let five = self.s.m.i32(5);
+        let half = self.s.m.bin(e, Bin::LShr, cl, five);
+        self.hs_wave = Some((base, half));
+        (base, half)
+    }
+
+    /// The handshake dword `k` of this console wave's area plus `h` (a half: 0 or 1).
+    fn hs_ptr(&mut self, at: usize, k: u32, h: V) -> V {
+        let (base, _) = self.hs_area();
+        let k = self.s.m.i32(k);
+        let i = self.s.m.bin(at, Bin::Add, base, k);
+        let i = self.s.m.bin(at, Bin::Add, i, h);
+        let lds = self.s.lds();
+        self.s.m.element(at, lds, i)
+    }
+
+    /// At the start of a block every lane runs: this half has left every lane branch
+    /// before it, so a half still waiting in one stops waiting for it.
+    fn hs_done(&mut self) {
+        let c = self.cur;
+        let (_, half) = self.hs_area();
+        let p = self.hs_ptr(c, 0, half);
+        let all = self.s.m.i32(u32::MAX);
+        let _ = self.s.m.atomic(c, super::bitcode::Rmw::Xchg, p, all);
+    }
+
+    /// At the end of a block every lane runs, before a lane branch: both halves are done
+    /// with the branches before (a barrier), this half's progress and marks go back to 0,
+    /// and both have done so before either enters (a barrier).
+    fn hs_reset(&mut self) {
+        let c = self.cur;
+        self.group_sync(c);
+        let (_, half) = self.hs_area();
+        let z = self.s.m.i32(0);
+        let p = self.hs_ptr(c, 0, half);
+        let _ = self.s.m.atomic(c, super::bitcode::Rmw::Xchg, p, z);
+        for j in 0..HS_SITES {
+            for parity in [0, 4] {
+                let m = self.hs_ptr(c, 2 + j * 8 + 2 + parity, half);
+                let _ = self.s.m.atomic(c, super::bitcode::Rmw::Xchg, m, z);
+            }
+        }
+        self.group_sync(c);
+    }
+
+    /// The successors of IR block `b`.
+    fn hs_next(&self, b: usize) -> Vec<usize> {
+        match self.x.st.exits.get(b) {
+            Some(LaneExit::Jump(t)) => vec![*t],
+            Some(LaneExit::Branch { taken, not_taken, .. }) => vec![*taken, *not_taken],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether a lane branch starts after IR block `b` (a successor not every lane runs).
+    fn into_lane_branch(&self, b: usize) -> bool {
+        self.hs_next(b).iter().any(|&t| !self.all_lanes(t))
+    }
+
+    /// The lane-branch region around IR block `b`: the blocks not every lane runs, joined
+    /// by their edges.
+    fn hs_region(&self, b: usize) -> Vec<bool> {
+        let n = self.x.st.exits.len();
+        let mut seen = vec![false; n];
+        let mut stack = vec![b];
+        while let Some(u) = stack.pop() {
+            if u >= n || seen[u] || self.all_lanes(u) {
+                continue;
+            }
+            seen[u] = true;
+            stack.extend(self.hs_next(u));
+            for v in 0..n {
+                if !seen[v] && !self.all_lanes(v) && self.hs_next(v).contains(&u) {
+                    stack.push(v);
+                }
+            }
+        }
+        seen
+    }
+
+    /// The loop headers of a region: the targets of its edges back to a block at or
+    /// before their source.
+    fn hs_heads(&self, region: &[bool]) -> Vec<usize> {
+        let mut heads: Vec<usize> = (0..region.len())
+            .filter(|&u| region[u])
+            .flat_map(|u| {
+                self.hs_next(u)
+                    .into_iter()
+                    .filter(move |&t| t <= u)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|&t| t < region.len() && region[t])
+            .collect();
+        heads.sort_unstable();
+        heads.dedup();
+        heads
+    }
+
+    /// For every lane-branch region with one loop: its header, and the region's blocks
+    /// entered from the loop that are past it (where a half has left the loop).
+    fn hs_plan(&mut self) {
+        self.hs_planned = true;
+        let n = self.x.st.exits.len();
+        self.hs_head = vec![false; n];
+        self.hs_out = vec![false; n];
+        let mut done = vec![false; n];
+        for b in 0..n {
+            if done[b] || self.all_lanes(b) {
+                continue;
+            }
+            let region = self.hs_region(b);
+            for u in 0..n {
+                done[u] |= region[u];
+            }
+            let heads = self.hs_heads(&region);
+            let [h] = heads[..] else { continue };
+            let last = (0..n)
+                .filter(|&u| region[u] && self.hs_next(u).contains(&h) && h <= u)
+                .max()
+                .unwrap_or(h);
+            self.hs_head[h] = true;
+            for u in h..=last {
+                for t in self.hs_next(u) {
+                    if t < n && region[t] && t > last {
+                        self.hs_out[t] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// At the top of a loop round: this half's round goes up by one and its point back to 0.
+    fn hs_round(&mut self) {
+        let c = self.cur;
+        let (_, half) = self.hs_area();
+        let p = self.hs_ptr(c, 0, half);
+        let z = self.s.m.i32(0);
+        let old = self.s.m.atomic(c, super::bitcode::Rmw::Or, p, z);
+        let mask = self.s.m.i32(0xFFFF_0000);
+        let round = self.s.m.bin(c, Bin::And, old, mask);
+        let step = self.s.m.i32(0x1_0000);
+        let new = self.s.m.bin(c, Bin::Add, round, step);
+        let _ = self.s.m.atomic(c, super::bitcode::Rmw::Xchg, p, new);
+    }
+
+    /// Past the loop: this half's round is past every round of it.
+    fn hs_left_loop(&mut self) {
+        let c = self.cur;
+        let (_, half) = self.hs_area();
+        let p = self.hs_ptr(c, 0, half);
+        let past = self.s.m.i32(0xFFFF_0000);
+        let _ = self.s.m.atomic(c, super::bitcode::Rmw::Or, p, past);
+    }
+
+    /// `VICTORY_LANE_HANDSHAKE=1`: the halves' values (lower half's, upper half's) at a
+    /// point in a lane branch, without a barrier. Each half writes its value and a mark,
+    /// then its progress (the point's number, counted in the order the program is
+    /// lowered: the order every path takes through a branch without loops), and waits
+    /// until the other half's progress has reached the point (or passed it, or the half
+    /// left the branch): a half that passed the point without being there had no lanes
+    /// there and gives 0, as the console's lanes outside EXEC give nothing. `None` where it
+    /// does not apply (switch off, a loop in the branch, the value made in another block,
+    /// sites used up).
+    fn hs_exchange(&mut self, at: usize, mine: V) -> Result<Option<(V, V)>, Why> {
+        if self.hs.is_none()
+            || at != self.cur
+            || self.hs_sites >= HS_SITES
+            || self.hs_heads(&self.hs_region(self.cur_ir)).len() > 1
+        {
+            if std::env::var_os("VICTORY_WAVE_WHY").is_some() {
+                eprintln!(
+                    "HANDSHAKE-NO block={} area={} same_block={} sites={} loops={}",
+                    self.cur_ir,
+                    self.hs.is_some(),
+                    at == self.cur,
+                    self.hs_sites,
+                    self.hs_heads(&self.hs_region(self.cur_ir)).len()
+                );
+            }
+            return Ok(None);
+        }
+        use super::bitcode::Rmw;
+        let j = self.hs_sites;
+        self.hs_sites += 1;
+        let c = self.cur;
+        let (_, half) = self.hs_area();
+        let z = self.s.m.i32(0);
+        let one = self.s.m.i32(1);
+        let other = self.s.m.bin(c, Bin::Xor, half, one);
+        // this half's round (the high 16 bits of its progress), and this point in it
+        let my_progress = self.hs_ptr(c, 0, half);
+        let now = self.s.m.atomic(c, Rmw::Or, my_progress, z);
+        let mask = self.s.m.i32(0xFFFF_0000);
+        let round = self.s.m.bin(c, Bin::And, now, mask);
+        let point = self.s.m.i32(j + 1);
+        let pos = self.s.m.bin(c, Bin::Or, round, point);
+        // the slots of this point for rounds of this parity: values of both halves, then
+        // their tags (the position they were written at)
+        let sixteen = self.s.m.i32(16);
+        let parity = self.s.m.bin(c, Bin::LShr, round, sixteen);
+        let parity = self.s.m.bin(c, Bin::And, parity, one);
+        let four = self.s.m.i32(4);
+        let shift = self.s.m.bin(c, Bin::Mul, parity, four);
+        let at_value = |l: &mut Self, h: V| {
+            let k = l.s.m.bin(c, Bin::Add, shift, h);
+            l.hs_ptr(c, 2 + j * 8, k)
+        };
+        let at_tag = |l: &mut Self, h: V| {
+            let k = l.s.m.bin(c, Bin::Add, shift, h);
+            l.hs_ptr(c, 2 + j * 8 + 2, k)
+        };
+        let my_value = at_value(self, half);
+        let my_tag = at_tag(self, half);
+        let their_value = at_value(self, other);
+        let their_tag = at_tag(self, other);
+        let _ = self.s.m.atomic(c, Rmw::Xchg, my_value, mine);
+        let _ = self.s.m.atomic(c, Rmw::Xchg, my_tag, pos);
+        let _ = self.s.m.atomic(c, Rmw::Xchg, my_progress, pos);
+        let their_progress = self.hs_ptr(c, 0, other);
+        let (lp, exit) = (self.s.m.new_block(), self.s.m.new_block());
+        self.s.m.terminate(c, Term::Br(lp));
+        let seen = self.s.m.atomic(lp, Rmw::Or, their_progress, z);
+        let there = self.s.m.cmp(lp, pred::IUGE, seen, pos);
+        self.s.m.terminate(lp, Term::CondBr(there, exit, lp));
+        self.cur = exit;
+        let v = self.s.m.atomic(exit, Rmw::Or, their_value, z);
+        let t = self.s.m.atomic(exit, Rmw::Or, their_tag, z);
+        let came = self.s.m.cmp(exit, pred::EQ, t, pos);
+        let theirs = self.s.m.select(exit, came, v, z);
+        let upper = self.s.m.cmp(exit, pred::NE, half, z);
+        let lo = self.s.m.select(exit, upper, theirs, mine);
+        let hi = self.s.m.select(exit, upper, mine, theirs);
+        Ok(Some((lo, hi)))
+    }
+
     /// The first of the two exchange dwords of this thread's console wave (made in the entry
     /// block): a group of several console waves has a pair for each.
     fn exchange_pair(&mut self, slot: u32) -> V {
@@ -4420,6 +4726,14 @@ impl<'a> Lower<'a> {
             // `VICTORY_BALLOT_OWN=1`: this host wave's own answer (see `ballot_own`)
             if ballot_own() {
                 return Ok(some);
+            }
+            // `VICTORY_LANE_HANDSHAKE=1`: the other half's answer without a barrier
+            let mine = self.s.m.cast(at, Cast::ZExt, some, i32t);
+            if let Some((lo, hi)) = self.hs_exchange(at, mine)? {
+                let c = self.cur;
+                let both = self.s.m.bin(c, Bin::Or, lo, hi);
+                let z = self.s.m.i32(0);
+                return Ok(self.s.m.cmp(c, pred::NE, both, z));
             }
             need(made.unwrap_or(0));
             return Err("a lane mask exchanged where not every lane runs");
