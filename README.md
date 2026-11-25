@@ -9,38 +9,50 @@ Ryzen 5 9600X, 32 GB RAM, Windows 11).
 **This repository contains no game files, code or assets.** You need your own
 copy. Not affiliated with or endorsed by the title's publisher.
 
-## Where it stands (2026-11-24)
+## Where it stands (2026-11-25)
 
-**Not playable yet, but the world renders.** Series X profile, 1080p output.
+**Not playable yet, but the world renders close to the real thing.** Series X
+profile, 1080p output.
 
 | Stage | State |
 | --- | --- |
 | Boot, menus | works, 30 fps |
-| Opening cutscene | plays, in 3D, correct colours |
-| Prison scenes and first gameplay | reached; characters, cars, sky and lighting draw |
-| Frame rate in the world | about 2.5 fps on average, 4-4.6 fps in lighter shots (was ~1.5) |
-| Textures | an 8 GB card filled up and left people untextured; the new texture-quality switch is the fix being tested |
-| Shadowed areas, skin | still dark: the title's ray-traced bounce light does not run yet |
-| Stability | no driver hang or device loss in our runs |
+| Opening cutscene, prison yard | plays in 3D: hair, haze, sun shafts, textures |
+| Frame rate in the world | about 1.4 fps now that far more of the scene is drawn (4,800-7,200 draws a frame); the GPU is the limit (~500 ms) |
+| Textures | fixed for 8 GB cards: the texture-skip switch now really works (~4 GB of card memory saved) |
+| Shaders | 268 translator tests pass; in a run only 2-4 compute programs fail, no pipeline is refused |
+| Ray tracing | its structure builder now gets all 53 pipelines, but the title crashes when it runs, so it stays off |
+| Shadowed areas, skin | still dark or black: needs the ray-tracing builder |
+| Stability | no driver hang or device loss; no crash with default settings |
 
 ## What this fork adds
 
-- **Texture quality for 8 GB cards** (`VICTORY_TEXTURE_SKIP_MIPS=1`): big
+- **Texture memory for 8 GB cards** (`VICTORY_TEXTURE_SKIP_MIPS=1`): big
   block-compressed textures become tiled resources with memory only from
   their second level down (about 4x less each); views clamp sampling there.
-  Size, levels and subresource numbers stay as the title made them.
-- **Shader cache that survives rebuilds**: keyed on the translator's source
-  and the GPU's wave width instead of the whole executable.
-- **Pre-compiling**: `victory translate` with `VICTORY_WARM_CACHE=1` fills the
-  runtime shader cache offline (26,599 shaders, ~26,260 translate).
-- **Pipeline builders that are not starved**: `VICTORY_PIPELINE_WORKERS`,
-  `VICTORY_PIPELINE_PRIORITY=normal`.
-- **Colour fix**: R9G9B9E5 is no longer renamed to R11G11B10 by default (the
-  title packs its light in that format; renamed, every frame came out purple).
-- **Shader translation**: `v_cvt_f32_f64`; the lane-mask restore from
-  upstream that lets the irradiance-cache programs translate.
-- **Series S** two-plane composition, a retry for texture formats the host
-  refuses as unordered access, an optional present gamma (`VICTORY_GAMMA`).
+  Reserved textures take the default alignment (the title's 4 KiB alignment
+  made every one fail before).
+- **Shader work merged from the other ports**: fxceless's latest main (first room
+  rendering, skin and hair textures, levels on demand, in-flight copy-back,
+  depth bounds), Zettrox/ztrx pull requests (permlane16/x16, 20+ VALU
+  instructions, 64-bit shifts and mul_hi without INT64, wave64 barriers,
+  ds_permute across two waves, a 256-thread GPU compare shader, LTO build),
+  24+ upstream VIctory fixes (f16 interpolation op_sel/omod/clamp, helper-lane
+  first-lane reads, normalized buffer ends, quadmask, ...), VItoriaBr fixes
+  (signature-row interpolation modes, immediate-sampler ranges, calculateLOD
+  on arrays, XMA wraps).
+- **LDS bounds** (on by default): console LDS accesses past the program's own
+  LDS read 0 and drop their writes, as the console does (`VICTORY_LDS_BOUNDS=0`
+  turns it off).
+- **32-lane GPUs** (`VICTORY_LDS_REGION_RACE=1`): programs that needed 64-lane
+  waves for LDS shared inside a lane branch run as two waves of 32; this is
+  what lets the shadow and ray-tracing builder programs get pipelines on NVIDIA.
+- **Shader cache that survives rebuilds**, **offline pre-compiling**
+  (`VICTORY_WARM_CACHE=1`), **pipeline builders that are not starved**,
+  the **R9G9B9E5 colour fix**, **Series S** composition.
+- **Diagnostics**: every silent draw drop names its reason;
+  `VICTORY_PSO_DUMP=<dir>` saves the blocks of the console pipeline calls
+  0x1c8/0x218 that are not implemented yet (16,000+ calls a run).
 
 ## Settings we run with
 
@@ -48,17 +60,21 @@ Series X profile, `VICTORY_DISPLAY_MODE=1920x1080`, `VICTORY_RELAY=2`,
 `VICTORY_WIDE_BACK=1`, `VICTORY_WIDE_REFRESH=1`, `VICTORY_WIDE_MERGE=1`,
 `VICTORY_CARD_REHASH_RUNS=1`, `VICTORY_JOIN_COPIES=1`,
 `VICTORY_PIPELINE_WAIT_MS=50`, `VICTORY_SHADER_LOOP_LIMIT=1024`,
-`VICTORY_TEXTURE_SKIP_MIPS=1`. Measured: the relay took the cutscene from
-~650 to ~450 ms a frame; the rest together to ~370 ms.
+`VICTORY_TEXTURE_SKIP_MIPS=1`, `VICTORY_CARD_FETCH_INFLIGHT=1` (copy-back
+~270 -> ~50-80 ms a frame), `VICTORY_LDS_REGION_RACE=1`,
+`VICTORY_FIRSTLANE_OWN=1`.
 
 ## Known problems
 
-- Dark shadows and skin (ray-traced bounce light, upstream work in progress).
-- Still images flicker with another copy of themselves.
-- About 14 shaders in gameplay still do not translate (descriptors read as
-  data, some wave64 forms), so some objects are missing.
-- Most of a frame is spent copying title memory to and from the card, not on
-  the GPU itself (~80-100 ms of GPU work per frame).
+- Dark shadows and black skin: the ray-tracing structure builder
+  (`VICTORY_BVH_BUILDER=1`) runs but the title crashes about a minute later;
+  the builder programs that run through the LDS race shortcut are the suspect.
+- Shadows show blocky tile edges (same cause).
+- Device methods 0x1c8 and 0x218 (pipelines from console-compiled pieces)
+  are not implemented: 16,000+ calls a run fail and the title goes without
+  those pipelines.
+- The GPU takes ~500 ms a frame now that far more is drawn.
+- Still images can flicker with another copy of themselves.
 
 ## Credits
 
@@ -207,6 +223,9 @@ info and above).
 | `VICTORY_RGB9E5_AS_R11=1` | name R9G9B9E5 as R11G11B10 (Series S render targets on NVIDIA; breaks the title's packed light) |
 | `VICTORY_PRESENT_PLANE=<n>` | show plane `n` alone; unset, two planes are composed (Series S) |
 | `VICTORY_GAMMA=<g>` | raise the presented image to 1/g (costs a submission; washes bright scenes) |
+| `VICTORY_LDS_REGION_RACE=1` | LDS read and written in one lane branch taken as two 32-lane waves (shadow and ray-tracing programs on NVIDIA; approximate) |
+| `VICTORY_LDS_BOUNDS=0` | turn off the console's LDS bounds rule (on by default) |
+| `VICTORY_PSO_DUMP=<dir>` | save the blocks of the unimplemented pipeline calls 0x1c8/0x218 (diagnostics) |
 
 ## Debugging
 
