@@ -2574,6 +2574,8 @@ const fn mtbuf(op: u8, vdata: u8, srsrc: u8, format: u8) -> [u32; 2] {
             | (srsrc as u32 >> 2 & 0x1F) << 16
             | (vdata as u32) << 8,
     ]
+}
+
 #[test]
 fn packed_dot_products_and_clamps_execute_cleanly() {
     let [iw0, iw1] = vop3p(0x016, 0, vgpr(1), vgpr(2), vgpr(3));
