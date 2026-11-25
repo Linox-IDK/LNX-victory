@@ -48,7 +48,7 @@ const fn vop3(op: u16, vdst: u8, src0: u16, src1: u16, src2: u16) -> [u32; 2] {
 }
 
 /// VOP3P `op vdst, src0, src1, src2` (default opsel_hi: high halves for second element).
-const fn vop3p(op: u16, vdst: u8, src0: u16, src1: u16, src2: u16) -> [u32; 2] {
+const fn vop3p_dot(op: u16, vdst: u8, src0: u16, src1: u16, src2: u16) -> [u32; 2] {
     [
         0x33 << 26 | (op as u32 & 0x7F) << 16 | vdst as u32,
         (src0 as u32 & 0x1FF) | (src1 as u32 & 0x1FF) << 9 | (src2 as u32 & 0x1FF) << 18 | (3 << 27),
@@ -2578,7 +2578,7 @@ const fn mtbuf(op: u8, vdata: u8, srsrc: u8, format: u8) -> [u32; 2] {
 
 #[test]
 fn packed_dot_products_and_clamps_execute_cleanly() {
-    let [iw0, iw1] = vop3p(0x016, 0, vgpr(1), vgpr(2), vgpr(3));
+    let [iw0, iw1] = vop3p_dot(0x016, 0, vgpr(1), vgpr(2), vgpr(3));
     let dot4_i8_shader = build_valu_cs(&[iw0, iw1]);
     let inputs = [[0x0403_0201u32, 0x0504_0302u32, 10u32, 0]];
     run_cases(&dot4_i8_shader, &inputs, |backend, _i, _inp, got| {
@@ -2593,14 +2593,14 @@ fn packed_dot_products_and_clamps_execute_cleanly() {
         assert_eq!(got, 50, "{backend}: v_dot4c_i32_i8 got {got}, want 50");
     });
 
-    let [uw0, uw1] = vop3p(0x017, 0, vgpr(1), vgpr(2), vgpr(3));
+    let [uw0, uw1] = vop3p_dot(0x017, 0, vgpr(1), vgpr(2), vgpr(3));
     let dot4_u8_shader = build_valu_cs(&[uw0, uw1]);
     run_cases(&dot4_u8_shader, &inputs, |backend, _i, _inp, got| {
         assert_eq!(got, 50, "{backend}: v_dot4_u32_u8 got {got}, want 50");
     });
 
     // opsel_hi / opsel swapping the halves of s0 on v_dot4_u32_u8 (opsel=0b001, opsel_hi=0b110)
-    let mut u8_op = vop3p(0x017, 0, vgpr(1), vgpr(2), vgpr(3));
+    let mut u8_op = vop3p_dot(0x017, 0, vgpr(1), vgpr(2), vgpr(3));
     u8_op[0] |= 1 << 11;
     u8_op[1] = (u8_op[1] & !(3 << 27)) | (2 << 27);
     let dot4_u8_opsel_shader = build_valu_cs(&u8_op);
@@ -2608,7 +2608,7 @@ fn packed_dot_products_and_clamps_execute_cleanly() {
         assert_eq!(got, 42, "{backend}: v_dot4_u32_u8 opsel got {got}, want 42");
     });
 
-    let [d2i_w0, d2i_w1] = vop3p(0x014, 0, vgpr(1), vgpr(2), vgpr(3));
+    let [d2i_w0, d2i_w1] = vop3p_dot(0x014, 0, vgpr(1), vgpr(2), vgpr(3));
     let dot2_i16_shader = build_valu_cs(&[d2i_w0, d2i_w1]);
     run_cases(
         &dot2_i16_shader,
@@ -2618,7 +2618,7 @@ fn packed_dot_products_and_clamps_execute_cleanly() {
         },
     );
 
-    let [d2u_w0, d2u_w1] = vop3p(0x015, 0, vgpr(1), vgpr(2), vgpr(3));
+    let [d2u_w0, d2u_w1] = vop3p_dot(0x015, 0, vgpr(1), vgpr(2), vgpr(3));
     let dot2_u16_shader = build_valu_cs(&[d2u_w0, d2u_w1]);
     run_cases(
         &dot2_u16_shader,
@@ -2628,7 +2628,7 @@ fn packed_dot_products_and_clamps_execute_cleanly() {
         },
     );
 
-    let [d8u_w0, d8u_w1] = vop3p(0x019, 0, vgpr(1), vgpr(2), vgpr(3));
+    let [d8u_w0, d8u_w1] = vop3p_dot(0x019, 0, vgpr(1), vgpr(2), vgpr(3));
     let dot8_u4_shader = build_valu_cs(&[d8u_w0, d8u_w1]);
     run_cases(
         &dot8_u4_shader,
@@ -2638,7 +2638,7 @@ fn packed_dot_products_and_clamps_execute_cleanly() {
         },
     );
 
-    let [mut d2f_w0, d2f_w1] = vop3p(0x013, 0, vgpr(1), vgpr(2), vgpr(3));
+    let [mut d2f_w0, d2f_w1] = vop3p_dot(0x013, 0, vgpr(1), vgpr(2), vgpr(3));
     let d2f_in = [[0x4000_3C00u32, 0x4400_4200u32, 5.0f32.to_bits(), 0]];
     let dot2_f16_shader = build_valu_cs(&[d2f_w0, d2f_w1]);
     run_cases(&dot2_f16_shader, &d2f_in, |backend, _i, _inp, got| {
@@ -2659,7 +2659,7 @@ fn packed_dot_products_and_clamps_execute_cleanly() {
     });
 
     // Clamped integer dot products saturate instead of wrapping.
-    let [mut cu_w0, cu_w1] = vop3p(0x017, 0, vgpr(1), vgpr(2), vgpr(3));
+    let [mut cu_w0, cu_w1] = vop3p_dot(0x017, 0, vgpr(1), vgpr(2), vgpr(3));
     cu_w0 |= 1 << 15;
     let clamp_u8_shader = build_valu_cs(&[cu_w0, cu_w1]);
     run_cases(
@@ -2670,7 +2670,7 @@ fn packed_dot_products_and_clamps_execute_cleanly() {
         },
     );
 
-    let [mut ci_w0, ci_w1] = vop3p(0x016, 0, vgpr(1), vgpr(2), vgpr(3));
+    let [mut ci_w0, ci_w1] = vop3p_dot(0x016, 0, vgpr(1), vgpr(2), vgpr(3));
     ci_w0 |= 1 << 15;
     let clamp_i8_shader = build_valu_cs(&[ci_w0, ci_w1]);
     let ci_in = [
@@ -2683,7 +2683,7 @@ fn packed_dot_products_and_clamps_execute_cleanly() {
     });
 
     // v_dot2_u32_u16 with opsel picking high half of v1 for pair 0 (opsel[0] = 1, opsel_hi[0] = 0).
-    let mut u16_op = vop3p(0x015, 0, vgpr(1), vgpr(2), vgpr(3));
+    let mut u16_op = vop3p_dot(0x015, 0, vgpr(1), vgpr(2), vgpr(3));
     u16_op[0] |= 1 << 11;
     u16_op[1] &= !(1 << 27);
     let opsel_u16_shader = build_valu_cs(&u16_op);
