@@ -967,6 +967,115 @@ mod tests {
         stores_v1(&[0x7E04_028B, 0xDACC_0000, 0x0100_0200]).unwrap();
     }
 
+    /// The same permute on a host of 32-lane waves (the checkerboard shadow
+    /// masks), where the lane named may be in the other host wave: the two
+    /// exchange their 64 lanes' dwords through a table past the program's LDS
+    /// ([`lower::Lower::bpermute_halves`]). It stopped as "a lane permute
+    /// across two host waves".
+    #[test]
+    fn a_backward_permute_across_two_host_waves_lowers_through_the_table() {
+        // v1 = s0 + v0; v2 = v0 << 2; ds_bpermute_b32 v1, v2, v1 offset 128
+        // (32 lanes on, so both halves read across)
+        let was = lower::TEST_HOST_WAVE.replace(Some(32));
+        let r = stores_v1(&[0x4A02_0000, 0x3404_0082, 0xDACC_0080, 0x0100_0102]);
+        lower::TEST_HOST_WAVE.set(was);
+        r.unwrap();
+    }
+
+    /// The same permute where only the lanes below s0 run it: refused per lane
+    /// (the table needs every lane's dword), the branch it sits in named; with
+    /// that branch taken wave-wide, it lowers.
+    #[test]
+    fn a_backward_permute_across_two_host_waves_needs_its_branch_wave_wide() {
+        // v_cmp_gt_u32 vcc, s0, v0; s_and_saveexec_b64 s[12:13], vcc;
+        // s_cbranch_execz over the body, to the restore of EXEC;
+        // v1 = s0 + v0; v2 = v0 << 2; ds_bpermute_b32 v1, v2, v1 offset 128;
+        // s_mov_b64 exec, s[12:13]
+        let body: [u32; 8] = [
+            0x7D88_0000, 0xBE8C_246A, 0xBF88_0004, 0x4A02_0000, 0x3404_0082, 0xDACC_0080,
+            0x0100_0102, 0xBEFE_040C,
+        ];
+        // (the same program as `stores_v1`, kept whole for the two structures)
+        use crate::native::{HwStage, NativeProgram, RootParam, ResourceType, RootType, UsedResource};
+        let mut words = vec![0xBE81_0380, 0xF408_0200, 0xFA00_0000];
+        words.extend_from_slice(&body);
+        words.extend_from_slice(&[0x3406_0082, 0xE070_1000, 0x8002_0103, 0xBF81_0000]);
+        let native = NativeProgram {
+            stage: HwStage::Cs,
+            wave64: true,
+            vgprs: 4,
+            layout: vec![RootParam {
+                root: RootType::Table,
+                table_offset_dwords: 0,
+                sgprs: 1,
+                base_register: 0,
+                user_data: 0,
+                slot: 0,
+            }],
+            used: vec![UsedResource {
+                kind: ResourceType::Uav,
+                root: RootType::Table,
+                table_offset_dwords: 0,
+                lower_bound: 0,
+                stride: 0,
+                dwords: 4,
+                user_data: 0,
+                slot: 0,
+            }],
+            io: StageIo::Cs(ComputeIo {
+                rsrc2: 2,
+                threads: [64, 1, 1],
+            }),
+            code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        };
+        let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
+        let branch = (0..p.blocks.len())
+            .find(|&b| p.blocks[b].insts.last().is_some_and(|i| i.name() == "s_cbranch_execz"))
+            .expect("the branch");
+        lower::take_needs();
+        let was = lower::TEST_HOST_WAVE.replace(Some(32));
+        let per_lane = {
+            let st = structure::structure(&p).unwrap();
+            let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+            let io = io::raise(&p, &native).unwrap();
+            lower::lower(&lower::Parts {
+                native: &native,
+                p: &p,
+                st: &st,
+                io: &io,
+                res: &res,
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                prims: Vec::new(),
+                mesh_stride: 0,
+            })
+        };
+        assert!(matches!(
+            &per_lane,
+            Err(crate::ShaderError::Unsupported { what, .. })
+                if *what == "a lane permute across two host waves where not every lane runs"
+        ));
+        let st = structure::structure(&p).unwrap();
+        assert_eq!(lower::branches_around(&st, &lower::take_needs()), Some(vec![branch]));
+        // wave-wide: every lane runs the permute (EXEC stays a guard on it)
+        let st = structure::structure_wide(&p, &std::collections::HashSet::from([branch])).unwrap();
+        let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+        let io = io::raise(&p, &native).unwrap();
+        let lowered = lower::lower(&lower::Parts {
+            native: &native,
+            p: &p,
+            st: &st,
+            io: &io,
+            res: &res,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            prims: Vec::new(),
+            mesh_stride: 0,
+        });
+        lower::TEST_HOST_WAVE.set(was);
+        lowered.unwrap();
+    }
+
     /// A carry-in reading a join of compares after a divergent branch. A
     /// lane that skipped the inner compare has VCC clear there (VOPC clears
     /// inactive lanes), not the first compare's bit, so the join is no
