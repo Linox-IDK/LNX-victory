@@ -61,7 +61,15 @@ pub enum Build {
 struct Structure {
     buffer: ID3D12Resource,
     size: u64,
+    /// What it was built from (bottom levels; 0 for others).
+    sig: u64,
+    /// The last frame it was built or named by a top level.
+    used: u64,
 }
+
+/// Structures neither built nor named by a top level for this many frames
+/// are let go (the title has reused or freed their memory).
+const IDLE_FRAMES: u64 = 300;
 
 /// The host structures by title address, and the shared scratch buffer.
 struct Store {
@@ -78,6 +86,32 @@ static BUILT_TOP: AtomicU64 = AtomicU64::new(0);
 static SKIPPED: AtomicU64 = AtomicU64::new(0);
 static MISSING_BLAS: AtomicU64 = AtomicU64::new(0);
 static BYTES: AtomicU64 = AtomicU64::new(0);
+static REUSED: AtomicU64 = AtomicU64::new(0);
+static FREED: AtomicU64 = AtomicU64::new(0);
+
+/// What a bottom level is built from: its flags and each geometry's
+/// description (addresses, counts, formats). Equal: the same structure, unless
+/// the title rebuilds it because the vertices moved (it then allows updates).
+fn signature(flags: u32, geometries: &[Triangles]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    flags.hash(&mut h);
+    for g in geometries {
+        (
+            g.opaque,
+            g.transform,
+            g.index_format,
+            g.vertex_format,
+            g.index_count,
+            g.vertex_count,
+            g.index_buffer,
+            g.vertex_buffer,
+            g.stride,
+        )
+            .hash(&mut h);
+    }
+    h.finish() | 1
+}
 
 /// A host GPU address for the title address `address` with `len` bytes
 /// behind it, its host copy brought up to date before the list runs.
@@ -152,6 +186,22 @@ pub fn build(list: *const Object, builds: &[Build]) {
             by_title: HashMap::new(),
             scratch: None,
         });
+        // Once a frame: let go of structures the title stopped using.
+        let frame = crate::queue::presented();
+        static SWEPT: AtomicU64 = AtomicU64::new(u64::MAX);
+        if SWEPT.swap(frame, Ordering::Relaxed) != frame {
+            store.by_title.retain(|_, st| {
+                let keep = frame.saturating_sub(st.used) < IDLE_FRAMES;
+                if !keep {
+                    BYTES.fetch_sub(
+                        st.size.min(BYTES.load(Ordering::Relaxed)),
+                        Ordering::Relaxed,
+                    );
+                    FREED.fetch_add(1, Ordering::Relaxed);
+                }
+                keep
+            });
+        }
         for b in builds {
             build_one(&device, &device5, &l4, host, store, b);
         }
@@ -168,6 +218,26 @@ fn build_one(
     store: &mut Store,
     b: &Build,
 ) {
+    let frame = crate::queue::presented();
+    // A bottom level built from the same inputs, not one that moves: kept.
+    let mut sig = 0;
+    if let Build::Bottom {
+        dest,
+        flags: f,
+        geometries,
+    } = b
+    {
+        sig = signature(*f, geometries);
+        let moves = f & 1 != 0; // ALLOW_UPDATE: its vertices change
+        if let Some(st) = store.by_title.get_mut(dest)
+            && st.sig == sig
+            && !moves
+        {
+            st.used = frame;
+            REUSED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
     // The inputs, with host addresses.
     let mut geometry = Vec::new();
     let mut instance_upload: Option<ID3D12Resource> = None;
@@ -253,7 +323,8 @@ fn build_one(
             for i in 0..n {
                 let at = i * 64 + 56;
                 let title = u64::from_le_bytes(raw[at..at + 8].try_into().unwrap_or_default());
-                let host_va = store.by_title.get(&title).map_or(0, |s| {
+                let host_va = store.by_title.get_mut(&title).map_or(0, |s| {
+                    s.used = frame;
                     // SAFETY: a live buffer.
                     unsafe { s.buffer.GetGPUVirtualAddress() }
                 });
@@ -316,10 +387,16 @@ fn build_one(
             Structure {
                 buffer: buf,
                 size: result_size,
+                sig,
+                used: frame,
             },
         ) {
             // The list may still read the old one: it holds it until done.
             host.keep(&old.buffer);
+            BYTES.fetch_sub(
+                old.size.min(BYTES.load(Ordering::Relaxed)),
+                Ordering::Relaxed,
+            );
         }
     }
     let scratch_fits = store
@@ -333,6 +410,8 @@ fn build_one(
         if let Some(old) = store.scratch.replace(Structure {
             buffer: buf,
             size: scratch_size,
+            sig: 0,
+            used: frame,
         }) {
             host.keep(&old.buffer);
         }
@@ -398,8 +477,10 @@ fn summary() {
         top = BUILT_TOP.swap(0, Ordering::Relaxed),
         skipped = SKIPPED.swap(0, Ordering::Relaxed),
         instances_without_ours = MISSING_BLAS.swap(0, Ordering::Relaxed),
+        reused = REUSED.swap(0, Ordering::Relaxed),
+        freed = FREED.swap(0, Ordering::Relaxed),
         structures_kept = kept,
-        mb_made = BYTES.load(Ordering::Relaxed) >> 20,
+        mb_live = BYTES.load(Ordering::Relaxed) >> 20,
         "native bvh: host structures built in the last 5 s"
     );
 }
