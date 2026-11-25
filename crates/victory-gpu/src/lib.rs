@@ -24,6 +24,8 @@ mod ambient;
 pub mod console;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod copystat;
+#[cfg(windows)]
+pub mod external;
 pub mod descriptor;
 pub mod device;
 #[cfg(windows)]

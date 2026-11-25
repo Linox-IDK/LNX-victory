@@ -66,6 +66,11 @@ pub fn run(
     let temp = cfg.data_subdir(&format!("{:08X}/temp", title.id))?;
     victory_hle::modules::files::mount_at('T', &temp);
     victory_hle::runtime::set_title(victory_hle::runtime::Title { storage, ..title });
+    // (upstream 0b35b7f) The host's PC FidelityFX upscaler in place of the console's.
+    #[cfg(windows)]
+    victory_hle::modules::fidelityfx::use_host_dir(
+        std::env::var_os("VICTORY_FIDELITYFX_DIR").map(std::path::PathBuf::from).as_deref(),
+    );
     victory_hle::console::set(match console {
         Console::SeriesX => victory_hle::console::Console::SeriesX,
         Console::SeriesS => victory_hle::console::Console::SeriesS,
