@@ -971,4 +971,27 @@ fn a_branch_that_only_raises_an_lds_flag_runs_in_waves_of_32() {
 fn a_branch_that_writes_lds_two_different_values_keeps_64_lanes() {
     // a second value after the read: what the flag ends up holding depends on what was read
     assert_eq!(flag_wave(&flag_program(Some(2))), Some(64));
+
+/// The ray-tracing builder's scans refuse on `v_readfirstlane_b32` under a
+/// per-lane branch: the cross-lane retry ([`super::widen`]) has to take the
+/// branch around it wave-wide so the two host waves meet at the exchange
+/// barrier, instead of skipping the other half's value.
+#[test]
+fn a_first_lane_refusal_is_retried_wave_wide() {
+    assert!(super::needs_wave_wide(
+        crate::native::HwStage::Cs,
+        "a first-lane read where not every lane runs"
+    ));
+    assert!(super::needs_wave_wide(
+        crate::native::HwStage::Cs,
+        "a lane read where not every lane runs"
+    ));
+    assert!(!super::needs_wave_wide(
+        crate::native::HwStage::Ps,
+        "a first-lane read where not every lane runs"
+    ));
+    assert!(!super::needs_wave_wide(
+        crate::native::HwStage::Cs,
+        "a descriptor chosen by control flow"
+    ));
 }
