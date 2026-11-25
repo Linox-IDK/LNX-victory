@@ -191,6 +191,7 @@ extern "C" fn batched(this: *mut u8, list: *mut u8, count: u32, descs: *const u8
         .batched_items
         .fetch_add(u64::from(count), Ordering::Relaxed);
     let detailed = SEEN_BATCHED.fetch_add(1, Ordering::Relaxed) < DETAILED;
+    let mut builds = Vec::new();
     if !descs.is_null() {
         for i in 0..count as usize {
             // SAFETY: `count` items of BATCHED_ITEM_SIZE bytes, a standard
@@ -206,8 +207,15 @@ extern "C" fn batched(this: *mut u8, list: *mut u8, count: u32, descs: *const u8
             }
             // SAFETY: as above.
             unsafe { read_inputs(d.add(8), "batched", show) };
+            if victory_gpu::native_rt::on() {
+                // SAFETY: as above; the destination first.
+                if let Some(b) = unsafe { parse(field::<u64>(d, 0), d.add(8)) } {
+                    builds.push(b);
+                }
+            }
         }
     }
+    victory_gpu::native_rt::build(list.cast_const().cast(), &builds);
     summary();
     // SAFETY: (`this`, ID3D12GraphicsCommandList6*, UINT, const DESC2*).
     let f: extern "C" fn(*mut u8, *mut u8, u32, *const u8) = unsafe { original(&BATCHED) };
@@ -342,6 +350,75 @@ unsafe fn read_inputs(inputs: *const u8, what: &str, detailed: bool) {
     }
 }
 
+/// The build `inputs` describe, for the host's own structures
+/// ([`victory_gpu::native_rt`]); `None` for a layout it does not take.
+///
+/// # Safety
+/// `inputs` points to the title's inputs structure.
+unsafe fn parse(dest: u64, inputs: *const u8) -> Option<victory_gpu::native_rt::Build> {
+    use victory_gpu::native_rt::{Build, Triangles};
+    if inputs.is_null() {
+        return None;
+    }
+    // SAFETY: the inputs structure.
+    let (kind, flags, n, layout, descs) = unsafe {
+        (
+            field::<u32>(inputs, 0),
+            field::<u32>(inputs, 4),
+            field::<u32>(inputs, 8),
+            field::<u32>(inputs, 12),
+            field::<u64>(inputs, 16),
+        )
+    };
+    if kind == 0 {
+        // Top level: `descs` is the instances' GPU address (an array).
+        return (layout == 0).then_some(Build::Top {
+            dest,
+            flags,
+            count: n,
+            instances: descs,
+        });
+    }
+    let descs = descs as *const u8;
+    if descs.is_null() {
+        return None;
+    }
+    let mut geometries = Vec::with_capacity(n as usize);
+    for i in 0..n as usize {
+        // SAFETY: the array (or array of pointers) of `n` descriptions.
+        let g = unsafe {
+            if layout == 0 {
+                descs.add(i * GEOMETRY_SIZE)
+            } else {
+                field::<u64>(descs, i * 8) as *const u8
+            }
+        };
+        // SAFETY: one geometry description, triangles (type 0) only.
+        if g.is_null() || unsafe { field::<u32>(g, 0) } != 0 {
+            return None;
+        }
+        // SAFETY: as above.
+        unsafe {
+            geometries.push(Triangles {
+                opaque: field::<u32>(g, 4) & 1 != 0,
+                transform: field(g, 8),
+                index_format: field(g, 16),
+                vertex_format: field(g, 20),
+                index_count: field(g, 24),
+                vertex_count: field(g, 28),
+                index_buffer: field(g, 32),
+                vertex_buffer: field(g, 40),
+                stride: field(g, 48),
+            });
+        }
+    }
+    Some(Build::Bottom {
+        dest,
+        flags,
+        geometries,
+    })
+}
+
 extern "C" fn prebuild(this: *mut u8, inputs: *const u8, stream: *const u8, info: *mut u64) {
     COUNTS.prebuild.fetch_add(1, Ordering::Relaxed);
     let detailed = SEEN_PREBUILD.fetch_add(1, Ordering::Relaxed) < DETAILED;
@@ -400,6 +477,17 @@ extern "C" fn rehydrate(
             // SAFETY: its inputs, at byte 8.
             unsafe { read_inputs(d.add(8), "rehydrate", true) };
         }
+    }
+    if victory_gpu::native_rt::on() && !descs.is_null() {
+        let builds: Vec<_> = (0..count as usize)
+            .filter_map(|i| {
+                // SAFETY: `count` standard build descriptions.
+                let d = unsafe { descs.add(i * BUILD_DESC_SIZE) };
+                // SAFETY: as above; inputs at byte 8.
+                unsafe { parse(field::<u64>(d, 0), d.add(8)) }
+            })
+            .collect();
+        victory_gpu::native_rt::build(list.cast_const().cast(), &builds);
     }
     summary();
     // SAFETY: (`this`, ID3D12GraphicsCommandList8*, UINT, const DESC*, const UINT64*) -> HRESULT.

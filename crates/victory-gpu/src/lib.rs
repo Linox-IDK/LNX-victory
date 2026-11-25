@@ -42,6 +42,7 @@ mod inplace;
 pub mod list;
 #[cfg(windows)]
 mod memory;
+pub mod native_rt;
 pub mod object;
 pub mod pipeline;
 #[cfg(windows)]
