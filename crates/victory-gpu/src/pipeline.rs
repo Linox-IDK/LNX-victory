@@ -232,6 +232,12 @@ struct Builder {
     whole: bool,
     /// One could not be made.
     off: bool,
+    /// The missing ones were named in the log.
+    warned: bool,
+    /// The frame (presents so far) of the last builder dispatch seen while
+    /// waiting, and the pipeline dispatched first in that frame: once all
+    /// are made, the builder starts at a frame's first stage, not midway.
+    seen: (u64, usize),
 }
 
 #[cfg(windows)]
@@ -239,6 +245,8 @@ static BUILDER: Mutex<Builder> = Mutex::new(Builder {
     pipelines: Vec::new(),
     whole: false,
     off: false,
+    warned: false,
+    seen: (u64::MAX, 0),
 });
 
 /// Whether `shaders` are a pipeline of the structure builder.
@@ -290,7 +298,7 @@ pub(crate) fn builder_off(why: &'static str) {
 /// At a dispatch of a builder pipeline: whether the builder runs (see
 /// [`Builder`]).
 #[cfg(windows)]
-pub(crate) fn builder_runs() -> bool {
+pub(crate) fn builder_runs(this: This) -> bool {
     static ALLOWED: OnceLock<bool> = OnceLock::new();
     if !*ALLOWED.get_or_init(|| std::env::var_os("VICTORY_BVH_BUILDER").is_some_and(|v| v == "1")) {
         return false;
@@ -310,7 +318,12 @@ pub(crate) fn builder_runs() -> bool {
         .collect();
     let missing = missing_pipelines.len();
     if missing > 0 {
-        b.off = true;
+        // LNX: wait for them (they may still be being made) instead of
+        // turning the builder off for the run.
+        if b.warned {
+            return false;
+        }
+        b.warned = true;
         for p in &missing_pipelines {
             if let Some(shader) = p.shaders.first() {
                 tracing::warn!(
@@ -323,8 +336,20 @@ pub(crate) fn builder_runs() -> bool {
         tracing::warn!(
             missing,
             of = b.pipelines.len(),
-            "the ray-tracing structure builder stays off: not all of its programs have a host pipeline, and its stages run all or none"
+            "the ray-tracing structure builder waits: not all of its programs have a host pipeline yet, and its stages run all or none"
         );
+        return false;
+    }
+    // All made: start at the first stage of a frame. The first builder
+    // dispatch of a frame is taken as its first stage once it is the same
+    // pipeline as the frame before's first.
+    let frame = crate::queue::presented();
+    if frame == b.seen.0 {
+        return false;
+    }
+    let first = this as usize;
+    if b.seen.1 != first {
+        b.seen = (frame, first);
         return false;
     }
     tracing::info!(
