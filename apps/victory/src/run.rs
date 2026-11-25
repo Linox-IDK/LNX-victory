@@ -109,6 +109,14 @@ pub fn run(
     }
     let exe_name = exe.file_name().unwrap_or_default().to_string_lossy();
     show(&exe_name, image.bind_imports(&with_dlls, policy)?);
+    // `VICTORY_BVH_HOOK=1`: the ray-tracing builder's calls are logged first.
+    let wrapped = image.wrap_imports(victory_hle::bvh_hook::DLL, &victory_hle::bvh_hook::wrap)?;
+    if wrapped > 0 {
+        println!(
+            "wrapped        {wrapped} imports of {}",
+            victory_hle::bvh_hook::DLL
+        );
+    }
     if !execute {
         println!("not executing (pass --execute to start the title)");
         return Ok(());

@@ -1,0 +1,426 @@
+//! `VICTORY_BVH_HOOK=1` (LNX, off by default): the executable's calls into the
+//! console's ray-tracing structure builder (`XboxBvhBuilder.dll`) go through
+//! wrappers here first, which log what the title asks for (counts, kinds,
+//! geometry) and then call the builder as before. The first step towards
+//! building the structures with the host's own ray tracing (native DXR).
+//!
+//! The builder is a C++ class; its methods take `this` first (the x64
+//! convention for member functions is the plain one with `this` in `rcx`),
+//! so each wrapper is an `extern "C"` function with `this` as its first
+//! argument. Its inputs are the standard D3D12 ray-tracing structures, plus
+//! two of the console's own (the batched build and the stream description),
+//! logged raw until their layout is known.
+
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
+
+/// The builder's DLL as the executable imports it.
+pub const DLL: &str = "XboxBvhBuilder.dll";
+
+fn on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_BVH_HOOK").is_some_and(|v| v == "1"))
+}
+
+/// Detailed logs per kind of call before only the counts go on.
+const DETAILED: u64 = 6;
+
+/// The builder's own functions, filled when the wrappers are installed.
+static CTOR: AtomicUsize = AtomicUsize::new(0);
+static DTOR: AtomicUsize = AtomicUsize::new(0);
+static BATCHED: AtomicUsize = AtomicUsize::new(0);
+static COPY: AtomicUsize = AtomicUsize::new(0);
+static PREBUILD: AtomicUsize = AtomicUsize::new(0);
+static REHYDRATE: AtomicUsize = AtomicUsize::new(0);
+static MORTON: AtomicUsize = AtomicUsize::new(0);
+
+/// Calls (and items in them) per kind, since the last summary.
+struct Counts {
+    batched: AtomicU64,
+    batched_items: AtomicU64,
+    copy: AtomicU64,
+    prebuild: AtomicU64,
+    prebuild_bottom: AtomicU64,
+    prebuild_top: AtomicU64,
+    prebuild_geometries: AtomicU64,
+    prebuild_triangles: AtomicU64,
+    rehydrate: AtomicU64,
+    rehydrate_items: AtomicU64,
+}
+
+static COUNTS: Counts = Counts {
+    batched: AtomicU64::new(0),
+    batched_items: AtomicU64::new(0),
+    copy: AtomicU64::new(0),
+    prebuild: AtomicU64::new(0),
+    prebuild_bottom: AtomicU64::new(0),
+    prebuild_top: AtomicU64::new(0),
+    prebuild_geometries: AtomicU64::new(0),
+    prebuild_triangles: AtomicU64::new(0),
+    rehydrate: AtomicU64::new(0),
+    rehydrate_items: AtomicU64::new(0),
+};
+
+/// Totals since the start (for the detailed-log budget).
+static SEEN_BATCHED: AtomicU64 = AtomicU64::new(0);
+static SEEN_PREBUILD: AtomicU64 = AtomicU64::new(0);
+static SEEN_REHYDRATE: AtomicU64 = AtomicU64::new(0);
+static SEEN_COPY: AtomicU64 = AtomicU64::new(0);
+
+/// For [`DLL`]'s import `name` bound to `original`: the wrapper to bind
+/// instead, when the hook is on and the import is one it knows.
+pub fn wrap(name: &str, original: usize) -> Option<usize> {
+    if !on() || original == 0 {
+        return None;
+    }
+    let method = name.strip_prefix('?')?;
+    let (slot, wrapper): (&AtomicUsize, usize) = if name.starts_with("??0XboxBvhBuilder") {
+        (&CTOR, ctor as *const () as usize)
+    } else if name.starts_with("??1XboxBvhBuilder") {
+        (&DTOR, dtor as *const () as usize)
+    } else if method.starts_with("BuildRaytracingAccelerationStructureBatched2X@") {
+        (&BATCHED, batched as *const () as usize)
+    } else if method.starts_with("CopyRaytracingAccelerationStructure@") {
+        (&COPY, copy as *const () as usize)
+    } else if method.starts_with("GetRaytracingAccelerationStructurePrebuildInfo@") {
+        (&PREBUILD, prebuild as *const () as usize)
+    } else if method.starts_with("RehydrateRaytracingAccelerationStructureBatched2X@") {
+        (&REHYDRATE, rehydrate as *const () as usize)
+    } else if method.starts_with("Set64BitMortonCodes@") {
+        (&MORTON, morton as *const () as usize)
+    } else {
+        tracing::info!(name, "bvh hook: an import of the builder left as it is");
+        return None;
+    };
+    slot.store(original, Ordering::Relaxed);
+    tracing::info!(name, "bvh hook: wrapped");
+    Some(wrapper)
+}
+
+/// The original behind `slot`, as a function of type `F`.
+///
+/// # Safety
+/// `F` must be the builder function's real signature.
+unsafe fn original<F: Copy>(slot: &AtomicUsize) -> F {
+    let address = slot.load(Ordering::Relaxed);
+    assert!(
+        address != 0,
+        "bvh hook: a wrapper ran before its original was known"
+    );
+    // SAFETY: the caller names the signature; `F` is a function pointer type.
+    unsafe { std::mem::transmute_copy(&address) }
+}
+
+/// `len` bytes at `p` as hex, 16 per group (empty for a null pointer).
+fn hex(p: *const u8, len: usize) -> String {
+    if p.is_null() {
+        return "null".to_owned();
+    }
+    // SAFETY: the title passed the pointer for at least this structure.
+    let bytes = unsafe { std::slice::from_raw_parts(p, len) };
+    bytes
+        .chunks(16)
+        .map(|c| c.iter().map(|b| format!("{b:02x}")).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A field of type `T` at byte `offset` of `p`.
+///
+/// # Safety
+/// `p + offset` must be readable for `T`.
+unsafe fn field<T: Copy>(p: *const u8, offset: usize) -> T {
+    // SAFETY: by the caller.
+    unsafe { p.add(offset).cast::<T>().read_unaligned() }
+}
+
+/// Every few seconds: the calls since the last summary.
+fn summary() {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    let due = last.is_none_or(|t| now.duration_since(t).as_secs() >= 5);
+    if !due {
+        return;
+    }
+    *last = Some(now);
+    let take = |a: &AtomicU64| a.swap(0, Ordering::Relaxed);
+    let c = &COUNTS;
+    tracing::info!(
+        batched = take(&c.batched),
+        batched_items = take(&c.batched_items),
+        rehydrate = take(&c.rehydrate),
+        rehydrate_items = take(&c.rehydrate_items),
+        prebuild = take(&c.prebuild),
+        bottom = take(&c.prebuild_bottom),
+        top = take(&c.prebuild_top),
+        geometries = take(&c.prebuild_geometries),
+        triangles = take(&c.prebuild_triangles),
+        copy = take(&c.copy),
+        "bvh hook: builder calls in the last 5 s"
+    );
+}
+
+extern "C" fn ctor(this: *mut u8, device: *mut u8, flag: u8) -> *mut u8 {
+    tracing::info!(?this, ?device, flag, "bvh hook: builder made");
+    // SAFETY: the constructor's signature (`this`, ID3D12Device11*, bool) -> this.
+    let f: extern "C" fn(*mut u8, *mut u8, u8) -> *mut u8 = unsafe { original(&CTOR) };
+    f(this, device, flag)
+}
+
+extern "C" fn dtor(this: *mut u8) {
+    tracing::info!(?this, "bvh hook: builder let go");
+    // SAFETY: the destructor's signature (`this`).
+    let f: extern "C" fn(*mut u8) = unsafe { original(&DTOR) };
+    f(this)
+}
+
+extern "C" fn morton(this: *mut u8, on: u8) {
+    tracing::info!(on, "bvh hook: 64-bit Morton codes");
+    // SAFETY: (`this`, bool).
+    let f: extern "C" fn(*mut u8, u8) = unsafe { original(&MORTON) };
+    f(this, on)
+}
+
+/// The console's batched build: `count` descriptions of a layout of its own
+/// (`D3D12XBOX_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_BATCHED_DESC2`).
+extern "C" fn batched(this: *mut u8, list: *mut u8, count: u32, descs: *const u8) {
+    COUNTS.batched.fetch_add(1, Ordering::Relaxed);
+    COUNTS
+        .batched_items
+        .fetch_add(u64::from(count), Ordering::Relaxed);
+    let detailed = SEEN_BATCHED.fetch_add(1, Ordering::Relaxed) < DETAILED;
+    if !descs.is_null() {
+        for i in 0..count as usize {
+            // SAFETY: `count` items of BATCHED_ITEM_SIZE bytes, a standard
+            // build description first (destination, inputs at byte 8, ...).
+            let d = unsafe { descs.add(i * BATCHED_ITEM_SIZE) };
+            let show = detailed && i < 2;
+            if show {
+                tracing::info!(
+                    i,
+                    item = hex(d, BATCHED_ITEM_SIZE),
+                    "bvh hook: batched item (raw)"
+                );
+            }
+            // SAFETY: as above.
+            unsafe { read_inputs(d.add(8), "batched", show) };
+        }
+    }
+    summary();
+    // SAFETY: (`this`, ID3D12GraphicsCommandList6*, UINT, const DESC2*).
+    let f: extern "C" fn(*mut u8, *mut u8, u32, *const u8) = unsafe { original(&BATCHED) };
+    f(this, list, count, descs)
+}
+
+extern "C" fn copy(this: *mut u8, list: *mut u8, dest: u64, source: u64, mode: u32) {
+    COUNTS.copy.fetch_add(1, Ordering::Relaxed);
+    if SEEN_COPY.fetch_add(1, Ordering::Relaxed) < DETAILED {
+        tracing::info!(
+            dest = format!("{dest:#x}"),
+            source = format!("{source:#x}"),
+            mode,
+            "bvh hook: copy"
+        );
+    }
+    summary();
+    // SAFETY: (`this`, ID3D12GraphicsCommandList4*, u64, u64, COPY_MODE).
+    let f: extern "C" fn(*mut u8, *mut u8, u64, u64, u32) = unsafe { original(&COPY) };
+    f(this, list, dest, source, mode)
+}
+
+/// `D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS`: type, flags,
+/// count, layout, then the descriptions (an array or an array of pointers).
+const INPUTS_SIZE: usize = 24;
+/// `D3D12_RAYTRACING_GEOMETRY_DESC`: type, flags, then the triangles
+/// (transform, index format, vertex format, index count, vertex count,
+/// index buffer, vertex buffer start and stride) or the boxes.
+const GEOMETRY_SIZE: usize = 56;
+/// `D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC`: destination,
+/// inputs, source, scratch.
+const BUILD_DESC_SIZE: usize = 8 + INPUTS_SIZE + 8 + 8;
+/// An item of the console's batched build (`..._BATCHED_DESC2`), as logged
+/// from the title: a standard build description, then a u64 (1 seen), a
+/// pointer, and 16 bytes of zeros.
+const BATCHED_ITEM_SIZE: usize = 80;
+
+/// Counts the geometry of `inputs` (bottom level: its geometries and
+/// triangles) and, while `detailed`, logs the first geometries.
+///
+/// # Safety
+/// `inputs` points to the title's inputs structure.
+unsafe fn read_inputs(inputs: *const u8, what: &str, detailed: bool) {
+    if inputs.is_null() {
+        return;
+    }
+    // SAFETY: the inputs structure (24 bytes).
+    let (kind, flags, n, layout, descs) = unsafe {
+        (
+            field::<u32>(inputs, 0),
+            field::<u32>(inputs, 4),
+            field::<u32>(inputs, 8),
+            field::<u32>(inputs, 12),
+            field::<u64>(inputs, 16) as *const u8,
+        )
+    };
+    if kind == 0 {
+        COUNTS.prebuild_top.fetch_add(1, Ordering::Relaxed);
+    } else {
+        COUNTS.prebuild_bottom.fetch_add(1, Ordering::Relaxed);
+        COUNTS
+            .prebuild_geometries
+            .fetch_add(u64::from(n), Ordering::Relaxed);
+    }
+    if detailed {
+        tracing::info!(
+            what,
+            level = if kind == 0 { "top" } else { "bottom" },
+            flags = format!("{flags:#x}"),
+            count = n,
+            layout = if layout == 0 { "array" } else { "pointers" },
+            "bvh hook: inputs"
+        );
+    }
+    if kind == 0 || descs.is_null() {
+        return;
+    }
+    for i in 0..n as usize {
+        // SAFETY: the array (or array of pointers) of `n` geometry descriptions.
+        let g = unsafe {
+            if layout == 0 {
+                descs.add(i * GEOMETRY_SIZE)
+            } else {
+                field::<u64>(descs, i * 8) as *const u8
+            }
+        };
+        if g.is_null() {
+            continue;
+        }
+        // SAFETY: one geometry description.
+        let (gkind, gflags) = unsafe { (field::<u32>(g, 0), field::<u32>(g, 4)) };
+        if gkind == 0 {
+            // SAFETY: its triangles part.
+            let (transform, ifmt, vfmt, icount, vcount, ib, vb, stride) = unsafe {
+                (
+                    field::<u64>(g, 8),
+                    field::<u32>(g, 16),
+                    field::<u32>(g, 20),
+                    field::<u32>(g, 24),
+                    field::<u32>(g, 28),
+                    field::<u64>(g, 32),
+                    field::<u64>(g, 40),
+                    field::<u64>(g, 48),
+                )
+            };
+            let triangles = if ib != 0 { icount / 3 } else { vcount / 3 };
+            COUNTS
+                .prebuild_triangles
+                .fetch_add(u64::from(triangles), Ordering::Relaxed);
+            if detailed && i < 3 {
+                tracing::info!(
+                    i,
+                    opaque = gflags & 1 != 0,
+                    transform = format!("{transform:#x}"),
+                    index_format = ifmt,
+                    vertex_format = vfmt,
+                    index_count = icount,
+                    vertex_count = vcount,
+                    index_buffer = format!("{ib:#x}"),
+                    vertex_buffer = format!("{vb:#x}"),
+                    stride,
+                    "bvh hook: triangles"
+                );
+            }
+        } else if detailed && i < 3 {
+            tracing::info!(
+                i,
+                kind = gkind,
+                "bvh hook: a geometry that is not triangles (boxes)"
+            );
+        }
+    }
+}
+
+extern "C" fn prebuild(this: *mut u8, inputs: *const u8, stream: *const u8, info: *mut u64) {
+    COUNTS.prebuild.fetch_add(1, Ordering::Relaxed);
+    let detailed = SEEN_PREBUILD.fetch_add(1, Ordering::Relaxed) < DETAILED;
+    // SAFETY: the title's inputs.
+    unsafe { read_inputs(inputs, "prebuild", detailed) };
+    if detailed {
+        tracing::info!(
+            stream = hex(stream, 32),
+            "bvh hook: prebuild stream description (raw)"
+        );
+    }
+    // SAFETY: (`this`, const INPUTS*, const XDXR_STREAM_DESC*, PREBUILD_INFO*).
+    let f: extern "C" fn(*mut u8, *const u8, *const u8, *mut u64) = unsafe { original(&PREBUILD) };
+    f(this, inputs, stream, info);
+    if detailed && !info.is_null() {
+        // SAFETY: the prebuild info the builder just wrote (three u64).
+        let (result, scratch, update) = unsafe { (*info, *info.add(1), *info.add(2)) };
+        tracing::info!(result, scratch, update, "bvh hook: prebuild sizes");
+    }
+    summary();
+}
+
+/// Structures the title brought ready-made (from its files): `count` build
+/// descriptions (standard layout) and, beside them, one u64 each.
+extern "C" fn rehydrate(
+    this: *mut u8,
+    list: *mut u8,
+    count: u32,
+    descs: *const u8,
+    extra: *const u64,
+) -> i32 {
+    COUNTS.rehydrate.fetch_add(1, Ordering::Relaxed);
+    COUNTS
+        .rehydrate_items
+        .fetch_add(u64::from(count), Ordering::Relaxed);
+    if SEEN_REHYDRATE.fetch_add(1, Ordering::Relaxed) < DETAILED && !descs.is_null() {
+        for i in 0..(count as usize).min(2) {
+            // SAFETY: `count` build descriptions.
+            let d = unsafe { descs.add(i * BUILD_DESC_SIZE) };
+            // SAFETY: the description's destination and source.
+            let (dest, source) = unsafe { (field::<u64>(d, 0), field::<u64>(d, 32)) };
+            // SAFETY: `extra` has one u64 per description when not null.
+            let x = if extra.is_null() {
+                0
+            } else {
+                unsafe { *extra.add(i) }
+            };
+            tracing::info!(
+                count,
+                i,
+                dest = format!("{dest:#x}"),
+                source = format!("{source:#x}"),
+                extra = format!("{x:#x}"),
+                "bvh hook: rehydrate"
+            );
+            // SAFETY: its inputs, at byte 8.
+            unsafe { read_inputs(d.add(8), "rehydrate", true) };
+        }
+    }
+    summary();
+    // SAFETY: (`this`, ID3D12GraphicsCommandList8*, UINT, const DESC*, const UINT64*) -> HRESULT.
+    let f: extern "C" fn(*mut u8, *mut u8, u32, *const u8, *const u64) -> i32 =
+        unsafe { original(&REHYDRATE) };
+    f(this, list, count, descs, extra)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layouts_match_d3d12() {
+        assert_eq!(INPUTS_SIZE, 24);
+        assert_eq!(GEOMETRY_SIZE, 56);
+        assert_eq!(BUILD_DESC_SIZE, 48);
+    }
+
+    #[test]
+    fn off_by_default_wraps_nothing() {
+        assert!(wrap("?Set64BitMortonCodes@XboxBvhBuilder@@QEAAX_N@Z", 0x1000).is_none());
+    }
+}
