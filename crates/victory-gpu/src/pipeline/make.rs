@@ -206,7 +206,6 @@ fn wait(p: &Pending, frame: u64) {
             }
         }
     }
-    crate::framelog::add(crate::framelog::T::PipelineWaitUs, started.elapsed().as_micros() as u64);
     #[cfg(feature = "diagnostics")]
     crate::copystat::add(
         crate::copystat::C::PipelineWaitUs,
