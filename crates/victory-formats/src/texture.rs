@@ -895,16 +895,23 @@ mod tests {
     }
 
     #[test]
-    fn console_formats_have_layouts() {
-        for (dxgi, bytes) in [(189, 4), (190, 1), (191, 4)] {
-            assert_eq!(
-                format(dxgi),
-                Some(Format {
-                    bytes,
-                    block: 1,
-                    stencil: false
-                })
-            );
+    fn console_formats_use_the_expected_color_layouts() {
+        for swizzle in [Swizzle::LINEAR, Swizzle::SW_64KB_D_X] {
+            // Compare against RGBA8 (28) or R8 (61), which have the same texel size.
+            for (format, reference) in [(189, 28), (190, 61), (191, 28)] {
+                let desc = TextureDesc {
+                    dimension: Dimension::Tex2d,
+                    width: 257,
+                    height: 129,
+                    depth_or_array: 2,
+                    mips: 4,
+                    format,
+                    samples: 1,
+                    swizzle,
+                };
+                let expected = Texture::new(&TextureDesc { format: reference, ..desc }).unwrap();
+                assert_eq!(Texture::new(&desc), Ok(expected), "format {format}, {swizzle:?}");
+            }
         }
     }
 
