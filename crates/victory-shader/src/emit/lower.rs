@@ -874,6 +874,13 @@ const HS_WAVE: u32 = 2 + 8 * HS_SITES;
 /// `VICTORY_LANE_HANDSHAKE=1` (LNX, off by default): a console wave run as two host
 /// waves of 32 exchanges ballots and any-lane answers inside lane branches without a
 /// barrier ([`Lower::hs_exchange`]).
+/// `VICTORY_BUILT_BOUNDS` (on unless `0`): accesses through built buffer descriptors keep
+/// the console's bounds ([`Lower::buffer`]).
+fn built_bounds() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_BUILT_BOUNDS").is_none_or(|v| v != "0"))
+}
+
 /// `VICTORY_HS_SPIN`: rounds a handshake waits for the other half at most.
 fn hs_spin() -> u32 {
     static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
@@ -11887,7 +11894,7 @@ impl<'a> Lower<'a> {
             return Err(name);
         }
         let site = (b, i);
-        let guard = self.guard(b, i)?;
+        let mut guard = self.guard(b, i)?;
         let c = self.cur;
         let store = name.starts_with("buffer_store_");
         // DXIL atomic operations: add, and, or, xor, signed and unsigned
@@ -11959,6 +11966,43 @@ impl<'a> Lower<'a> {
             .copied()
             .ok_or("an untracked buffer")?;
         let used = self.used_kind(src);
+        // LNX: a descriptor the code builds keeps the console's bounds. The host binds it
+        // as a root view, which has none: an access past the record count, which the
+        // console drops (a store, an atomic) or reads as 0, went on into the memory after
+        // it (the ray-tracing builder's discarded writes; the title then read pointers
+        // of 0 and -1, and a run's heap was corrupted). `VICTORY_BUILT_BOUNDS=0`: unchecked.
+        if let Source::Built { bits, words: [num, w3], .. } = *src
+            && built_bounds()
+        {
+            let stride = (bits >> 16) & 0x3FFF;
+            let oob = (w3 >> 28) & 3;
+            let bytes = if narrow.is_some() { 1 } else { 4 * count };
+            let ok = if oob == 2 {
+                (num == 0).then(|| self.s.m.bool(false))
+            } else if stride == 0 || oob == 3 {
+                // raw: every byte of the access below the record count (in bytes)
+                Some(if num < bytes {
+                    self.s.m.bool(false)
+                } else {
+                    let last = self.s.m.i32(num - bytes);
+                    self.s.m.cmp(c, pred::IULE, off, last)
+                })
+            } else {
+                // structured: the element below the record count (in elements)
+                let i = match index {
+                    Some(i) => i,
+                    None => self.s.m.i32(0),
+                };
+                let n = self.s.m.i32(num);
+                Some(self.s.m.cmp(c, pred::IULT, i, n))
+            };
+            if let Some(ok) = ok {
+                guard = Some(match guard {
+                    Some(g) => self.s.m.bin(c, Bin::And, g, ok),
+                    None => ok,
+                });
+            }
+        }
         let (base, extra) = self.built_offset(src)?;
         if base != 0 {
             let b = self.s.m.i32(base);
