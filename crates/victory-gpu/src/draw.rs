@@ -1025,7 +1025,11 @@ impl State {
                 && !crate::pipeline::builder_quarantined(self.pipeline as This);
             // Title memory by address: what the shader finds it by.
             let memory = if t.host.root_srvs.contains(&victory_shader::emit::SLOT_MEMORY) {
-                let Some(ready) = self.memory_ready(list, compute, writes) else {
+                // A shader that only reads title memory by address (it writes its result to
+                // a texture or a root view) leaves the copies as they were: no compare and
+                // copy back of every copy after it (LNX after DexNom bc3cd4b).
+                let raw_writes = writes && (t.host.writes_guest_memory || !write_skip());
+                let Some(ready) = self.memory_ready(list, compute, raw_writes) else {
                     once!("a shader that reads title memory by address without a view heap to hold its views: the draw is dropped");
                     #[cfg(feature = "diagnostics")]
                     crate::pipeline::note_why("bind refused at draw.rs:1020 after: eads title memory by address without a view heap to hold its views: the draw is dropped');".into());

@@ -60,6 +60,8 @@ pub(crate) struct Lowered {
     pub root_cbvs: Vec<u8>,
     pub root_srvs: Vec<u8>,
     pub root_uavs: Vec<u8>,
+    /// A store or atomic goes to title memory by raw address (LNX after DexNom bc3cd4b).
+    pub writes_guest_memory: bool,
     pub user_data: Vec<UserData>,
     pub samplers: Vec<[u32; 4]>,
     /// The wave size the shader requires of the host, if any.
@@ -2724,6 +2726,7 @@ impl<'a> Lower<'a> {
             root_cbvs,
             root_srvs,
             root_uavs,
+            writes_guest_memory: self.s.writes_guest_memory,
             #[cfg(test)]
             nonuniform_handles: self.s.nonuniform_handles,
             #[cfg(test)]
@@ -3366,6 +3369,7 @@ impl<'a> Lower<'a> {
         if let Some(rest) = name.strip_prefix("global_store_") {
             let n = count(rest)?;
             let d = data.as_ref().ok_or("global store data")?;
+            self.s.writes_guest_memory = true;
             let vals = self.vgprs(inst, d, n)?;
             let (h, byte) = self.memory(lo, hi, guard);
             let mut args = vec![h, byte, iu];
@@ -3383,6 +3387,7 @@ impl<'a> Lower<'a> {
             return Err(name);
         };
         let d = data.as_ref().ok_or("global atomic data")?;
+        self.s.writes_guest_memory = true;
         let v = self.vgprs(inst, d, 1)?[0];
         // With `glc` the value from before comes back, in the result
         // register the instruction names.
