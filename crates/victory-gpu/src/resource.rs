@@ -293,7 +293,11 @@ pub(crate) fn target_format(format: u32) -> u32 {
                     | D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW.0;
                 let refused = asked.is_err() || support.Support1.0 & both != both;
                 if refused {
-                    tracing::info!(format = f, stand_in = to, "the host does not render to this format: a stand-in is used");
+                    tracing::info!(
+                        format = f,
+                        stand_in = to,
+                        "the host does not render to this format: a stand-in is used"
+                    );
                 }
                 refused
             })
@@ -1299,7 +1303,11 @@ pub(crate) fn host_waits(this: This) -> bool {
     let r = resource(this);
     r.desc.dimension != BUFFER
         && !r.host.refused.load(std::sync::atomic::Ordering::Relaxed)
-        && r.host.made.lock().unwrap_or_else(|e| e.into_inner()).is_none()
+        && r.host
+            .made
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
 }
 
 /// The host side of title texture `this`: made now if it is not there and
@@ -1341,17 +1349,25 @@ fn hosted(this: This, make: bool) -> Option<Made> {
             let start = r.data() as u64;
             // What the upload can read: a console layout, no XOR mode
             // (`crate::texture` `staging`).
-            let readable = texture_layout(&r.desc).is_some_and(|t| !t.planes[0].layout.desc.swizzle.xor());
+            let readable =
+                texture_layout(&r.desc).is_some_and(|t| !t.planes[0].layout.desc.swizzle.xor());
             let partly = readable
                 && bytes >= crate::tiles::floor()
                 && (!crate::texture::committed(r.data().cast_const(), bytes as usize)
-                    || crate::descriptor::host::next_start(start, start.saturating_add(bytes)).is_some()
+                    || crate::descriptor::host::next_start(start, start.saturating_add(bytes))
+                        .is_some()
                     || crate::descriptor::host::first_viewed(start).is_some_and(|first| first > 0));
-            let reserved = if partly { host_texture_as(&r.desc, r.host.state, clear, true) } else { None };
+            let reserved = if partly {
+                host_texture_as(&r.desc, r.host.state, clear, true)
+            } else {
+                None
+            };
             let cut = reserved
                 .as_ref()
                 .zip(crate::host::host())
-                .and_then(|(t, host)| crate::tiles::Tiled::make(&host.device, t, u32::from(r.desc.mip_levels)));
+                .and_then(|(t, host)| {
+                    crate::tiles::Tiled::make(&host.device, t, u32::from(r.desc.mip_levels))
+                });
             // (Both or neither: a reserved texture the card will not cut
             // into tiles is dropped here, and the old kind is made below.)
             if cut.is_some() {
@@ -1449,7 +1465,8 @@ pub(crate) fn room() -> bool {
         // world makes in its first frame ([`targets_room_kept`]) counts as
         // used.
         Some([budget, used, ..]) => {
-            used + crate::shadow::card_room_kept() + targets_room_kept() < budget / 100 * room_percent()
+            used + crate::shadow::card_room_kept() + targets_room_kept()
+                < budget / 100 * room_percent()
         }
         None => filled < WITHOUT_BUDGET,
     }
@@ -1483,7 +1500,9 @@ pub(crate) fn targets_room_kept() -> u64 {
             .map_or(3072 << 20, |mb| mb.min(8192) << 20)
     });
     // Every host texture's bytes less those of the copies the title fills.
-    let targets = HOST_TEXTURES[1].load(Relaxed).saturating_sub(KINDS[1].load(Relaxed));
+    let targets = HOST_TEXTURES[1]
+        .load(Relaxed)
+        .saturating_sub(KINDS[1].load(Relaxed));
     most.saturating_sub(targets)
 }
 
@@ -1533,7 +1552,9 @@ pub(crate) fn placed_known(address: u64, desc: &[u32; 14]) -> Option<This> {
     key[1] = 0;
     key[13] = 0;
     let map = PLACED_TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
-    map.get(&(address, key)).or_else(|| map.get(&(address, *desc))).map(|&r| r as This)
+    map.get(&(address, key))
+        .or_else(|| map.get(&(address, *desc)))
+        .map(|&r| r as This)
 }
 
 /// For the card accounting line: whether title texture `this` has a host
@@ -1555,7 +1576,11 @@ pub(crate) fn copy_state(this: This) -> Option<(u8, u64, u64)> {
     let made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
     Some(match made.as_ref() {
         Some((host, _)) => (2, host.bytes, memory),
-        None => (u8::from(r.host.gone.load(Relaxed)), footprint(&r.desc).map_or(0, |f| f.size), memory),
+        None => (
+            u8::from(r.host.gone.load(Relaxed)),
+            footprint(&r.desc).map_or(0, |f| f.size),
+            memory,
+        ),
     })
 }
 
@@ -1585,12 +1610,18 @@ pub(crate) fn copy_state(this: This) -> Option<(u8, u64, u64)> {
 /// one that is not. Not measured: a tenth to half a second is expected,
 /// and the line says what it took. No line is begun while one is walking.
 #[cfg(windows)]
-pub(crate) fn card_accounting(room: bool, due: [u64; 5], never: Vec<(u64, u64)>, gone: Vec<(u64, u64)>) {
+pub(crate) fn card_accounting(
+    room: bool,
+    due: [u64; 5],
+    never: Vec<(u64, u64)>,
+    gone: Vec<(u64, u64)>,
+) {
     use std::sync::atomic::Ordering::Relaxed;
     static WALKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     // Host copies let go and their bytes, made again and their bytes, and
     // made in all, at the line before.
-    static BEFORE: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+    static BEFORE: [std::sync::atomic::AtomicU64; 5] =
+        [const { std::sync::atomic::AtomicU64::new(0) }; 5];
     if WALKING.swap(true, Relaxed) {
         return;
     }
@@ -1619,7 +1650,11 @@ pub(crate) fn card_accounting(room: bool, due: [u64; 5], never: Vec<(u64, u64)>,
     }
     let kinds = KINDS.each_ref().map(|k| k.load(Relaxed));
     let mut since = [0u64; 5];
-    for ((slot, now), before) in since.iter_mut().zip([kinds[2], kinds[3], kinds[4], kinds[5], kinds[6]]).zip(&BEFORE) {
+    for ((slot, now), before) in since
+        .iter_mut()
+        .zip([kinds[2], kinds[3], kinds[4], kinds[5], kinds[6]])
+        .zip(&BEFORE)
+    {
         *slot = now.saturating_sub(before.swap(now, Relaxed));
     }
     let video = crate::host::host().and_then(|h| h.video_memory());
@@ -1647,7 +1682,9 @@ pub(crate) fn card_accounting(room: bool, due: [u64; 5], never: Vec<(u64, u64)>,
                 c[6] += 1;
                 continue;
             };
-            if layout.size == 0 || crate::texture::committed(memory as *const u8, layout.size as usize) {
+            if layout.size == 0
+                || crate::texture::committed(memory as *const u8, layout.size as usize)
+            {
                 continue;
             }
             c[3] += 1;
@@ -1665,7 +1702,11 @@ pub(crate) fn card_accounting(room: bool, due: [u64; 5], never: Vec<(u64, u64)>,
             let all: u64 = mips.iter().map(texels).sum::<u64>().max(1);
             let (mut missing, mut any) = (0u64, false);
             for (level, m) in mips.iter().enumerate().take(tail) {
-                let end = if level == 0 { layout.slice_size } else { mips[level - 1].offset };
+                let end = if level == 0 {
+                    layout.slice_size
+                } else {
+                    mips[level - 1].offset
+                };
                 if end <= m.offset {
                     continue;
                 }
@@ -1709,15 +1750,54 @@ pub(crate) fn card_accounting(room: bool, due: [u64; 5], never: Vec<(u64, u64)>,
         };
         let (never, gone) = (mapped(&never), mapped(&gone));
         let [budget_mb, used_mb] = video.map_or([0, 0], |v| [v[0] >> 20, v[1] >> 20]);
-        let [copies_n, copies_mb, unmapped_mb, partly, largest, nothing, unknown] =
-            [c[0], c[1] >> 20, c[2] >> 20, c[3], c[4], c[5], c[6]];
+        let [
+            copies_n,
+            copies_mb,
+            unmapped_mb,
+            partly,
+            largest,
+            nothing,
+            unknown,
+        ] = [c[0], c[1] >> 20, c[2] >> 20, c[3], c[4], c[5], c[6]];
         let [without_never, without_gone] = without;
-        let [due_slots, due_uploaded, due_other, alive_n, alive_mb] = [due[0], due[1], due[2], due[3], due[4] >> 20];
-        let [never_n, never_mb, never_whole, never_whole_mb, never_part, never_part_mb, never_none] =
-            [never[0], never[1] >> 20, never[2], never[3] >> 20, never[4], never[5] >> 20, never[6]];
-        let [gone_n, gone_mb, gone_whole, gone_whole_mb, gone_part, gone_part_mb, gone_none] =
-            [gone[0], gone[1] >> 20, gone[2], gone[3] >> 20, gone[4], gone[5] >> 20, gone[6]];
-        let [let_go, let_go_mb, again, again_mb, made] = [since[0], since[1] >> 20, since[2], since[3] >> 20, since[4]];
+        let [due_slots, due_uploaded, due_other, alive_n, alive_mb] =
+            [due[0], due[1], due[2], due[3], due[4] >> 20];
+        let [
+            never_n,
+            never_mb,
+            never_whole,
+            never_whole_mb,
+            never_part,
+            never_part_mb,
+            never_none,
+        ] = [
+            never[0],
+            never[1] >> 20,
+            never[2],
+            never[3] >> 20,
+            never[4],
+            never[5] >> 20,
+            never[6],
+        ];
+        let [
+            gone_n,
+            gone_mb,
+            gone_whole,
+            gone_whole_mb,
+            gone_part,
+            gone_part_mb,
+            gone_none,
+        ] = [
+            gone[0],
+            gone[1] >> 20,
+            gone[2],
+            gone[3] >> 20,
+            gone[4],
+            gone[5] >> 20,
+            gone[6],
+        ];
+        let [let_go, let_go_mb, again, again_mb, made] =
+            [since[0], since[1] >> 20, since[2], since[3] >> 20, since[4]];
         let walk_ms = began.elapsed().as_millis() as u64;
         let [by_level_n, by_level_mb] = [on_demand[0], on_demand[1] >> 20];
         tracing::info!(
@@ -1735,7 +1815,11 @@ pub(crate) fn card_accounting(room: bool, due: [u64; 5], never: Vec<(u64, u64)>,
         );
         WALKING.store(false, Relaxed);
     };
-    if std::thread::Builder::new().name("card accounting".into()).spawn(walk).is_err() {
+    if std::thread::Builder::new()
+        .name("card accounting".into())
+        .spawn(walk)
+        .is_err()
+    {
         WALKING.store(false, Relaxed);
     }
 }
@@ -1918,7 +2002,9 @@ pub(crate) fn census() -> [u64; 10] {
                     placed_filled += 1;
                     // Its first page: a texture's smallest mips lie there,
                     // and are mapped first and unmapped last.
-                    if placed_filled.is_multiple_of(EVERY) && !crate::texture::committed(r.data().cast_const(), 1) {
+                    if placed_filled.is_multiple_of(EVERY)
+                        && !crate::texture::committed(r.data().cast_const(), 1)
+                    {
                         count[8] += host.bytes * EVERY;
                         if crate::host::references(&host.texture) > 1 {
                             count[9] += host.bytes * EVERY;
@@ -1950,13 +2036,18 @@ fn host_bytes(texture: &windows::Win32::Graphics::Direct3D12::ID3D12Resource) ->
     // SAFETY: plain queries on a live resource and device.
     unsafe {
         let desc = texture.GetDesc();
-        host.device.GetResourceAllocationInfo(0, &[desc]).SizeInBytes
+        host.device
+            .GetResourceAllocationInfo(0, &[desc])
+            .SizeInBytes
     }
 }
 
 #[cfg(windows)]
 impl HostTexture {
-    fn new(texture: windows::Win32::Graphics::Direct3D12::ID3D12Resource, state: u32) -> HostTexture {
+    fn new(
+        texture: windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+        state: u32,
+    ) -> HostTexture {
         use std::sync::atomic::Ordering::Relaxed;
         let bytes = host_bytes(&texture);
         HOST_TEXTURES[0].fetch_add(1, Relaxed);
@@ -2005,7 +2096,10 @@ impl Drop for HostTexture {
 /// (never released), for the memory line.
 #[cfg(all(windows, feature = "diagnostics"))]
 pub(crate) fn placed_textures() -> u64 {
-    PLACED_TEXTURES.lock().unwrap_or_else(|e| e.into_inner()).len() as u64
+    PLACED_TEXTURES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .len() as u64
 }
 
 /// Moves the host texture to `wanted` (a host texture state); the host
@@ -2125,7 +2219,10 @@ fn host_texture_as(
         && let Some(t) = reserved_texture(host, &d, state, k)
     {
         crate::host::name(&t, || {
-            format!("texture {}x{} f{} flags {:#x} (top {k} levels unbacked)", d.width, d.height, d.format, d.flags)
+            format!(
+                "texture {}x{} f{} flags {:#x} (top {k} levels unbacked)",
+                d.width, d.height, d.format, d.flags
+            )
         });
         return Some(t);
     }
@@ -2138,9 +2235,10 @@ fn host_texture_as(
         unsafe {
             host.device.CreateReservedResource(
                 (&raw const d).cast(),
-                D3D12_RESOURCE_STATES(
-                    crate::host::legal_for(d.flags, crate::host::texture_state(state)) as i32,
-                ),
+                D3D12_RESOURCE_STATES(crate::host::legal_for(
+                    d.flags,
+                    crate::host::texture_state(state),
+                ) as i32),
                 None,
                 &mut texture,
             )
@@ -2153,9 +2251,10 @@ fn host_texture_as(
                 &heap,
                 D3D12_HEAP_FLAG_NONE,
                 (&raw const d).cast(),
-                D3D12_RESOURCE_STATES(
-                    crate::host::legal_for(d.flags, crate::host::texture_state(state)) as i32,
-                ),
+                D3D12_RESOURCE_STATES(crate::host::legal_for(
+                    d.flags,
+                    crate::host::texture_state(state),
+                ) as i32),
                 // The same layout: format, then color or depth and stencil.
                 clear_value.as_ref().map(|v| std::ptr::from_ref(v).cast()),
                 &mut texture,
@@ -2175,9 +2274,10 @@ fn host_texture_as(
                     &heap,
                     D3D12_HEAP_FLAG_NONE,
                     (&raw const d2).cast(),
-                    D3D12_RESOURCE_STATES(
-                        crate::host::legal_for(d2.flags, crate::host::texture_state(state)) as i32,
-                    ),
+                    D3D12_RESOURCE_STATES(crate::host::legal_for(
+                        d2.flags,
+                        crate::host::texture_state(state),
+                    ) as i32),
                     clear_value.as_ref().map(|v| std::ptr::from_ref(v).cast()),
                     &mut texture,
                 )
@@ -2194,7 +2294,10 @@ fn host_texture_as(
     }
     if let Some(t) = &texture {
         crate::host::name(t, || {
-            format!("texture {}x{} f{} flags {:#x}", d.width, d.height, d.format, d.flags)
+            format!(
+                "texture {}x{} f{} flags {:#x}",
+                d.width, d.height, d.format, d.flags
+            )
         });
     }
     texture
@@ -2223,7 +2326,10 @@ fn skip_mips(host: &crate::host::Host, d: &ResourceDesc) -> Option<u32> {
             .unwrap_or(0)
             .min(3);
         if k > 0 {
-            tracing::info!(levels = k, "big compressed textures: top levels without memory");
+            tracing::info!(
+                levels = k,
+                "big compressed textures: top levels without memory"
+            );
         }
         k
     });
@@ -2245,7 +2351,10 @@ fn skip_mips(host: &crate::host::Host, d: &ResourceDesc) -> Option<u32> {
         .is_ok();
         let tier = o.TiledResourcesTier.0;
         if !ok || tier < 2 {
-            tracing::warn!(tier, "VICTORY_TEXTURE_SKIP_MIPS needs tiled resources tier 2: off");
+            tracing::warn!(
+                tier,
+                "VICTORY_TEXTURE_SKIP_MIPS needs tiled resources tier 2: off"
+            );
         }
         ok && tier >= 2
     });
@@ -2268,7 +2377,8 @@ fn skip_mips(host: &crate::host::Host, d: &ResourceDesc) -> Option<u32> {
 
 /// The private data that says how many top levels of a host texture have
 /// no memory, and the one that keeps its heap alive.
-const SKIP_GUID: windows::core::GUID = windows::core::GUID::from_u128(0x5f3c_1a2e_7b4d_4c8e_9a61_0d2f_3e4b_5a71);
+const SKIP_GUID: windows::core::GUID =
+    windows::core::GUID::from_u128(0x5f3c_1a2e_7b4d_4c8e_9a61_0d2f_3e4b_5a71);
 const SKIP_HEAP_GUID: windows::core::GUID =
     windows::core::GUID::from_u128(0x5f3c_1a2e_7b4d_4c8e_9a61_0d2f_3e4b_5a72);
 
@@ -2291,7 +2401,9 @@ fn reserved_texture(
     let made = unsafe {
         host.device.CreateReservedResource(
             (&raw const r).cast(),
-            D3D12_RESOURCE_STATES(crate::host::legal_for(r.flags, crate::host::texture_state(state)) as i32),
+            D3D12_RESOURCE_STATES(
+                crate::host::legal_for(r.flags, crate::host::texture_state(state)) as i32,
+            ),
             None,
             &mut texture,
         )
@@ -2330,7 +2442,10 @@ fn reserved_texture(
         host.device.CreateHeap(
             &D3D12_HEAP_DESC {
                 SizeInBytes: u64::from(tiles) * 65536,
-                Properties: D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() },
+                Properties: D3D12_HEAP_PROPERTIES {
+                    Type: D3D12_HEAP_TYPE_DEFAULT,
+                    ..Default::default()
+                },
                 Alignment: 0,
                 Flags: D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES,
             },
@@ -2343,8 +2458,19 @@ fn reserved_texture(
     let heap = heap?;
     // Every tile from level `k`'s first on, in the order the texture numbers
     // them (the packed small levels last), onto the heap from its start.
-    let coordinate = D3D12_TILED_RESOURCE_COORDINATE { X: 0, Y: 0, Z: 0, Subresource: k };
-    let size = D3D12_TILE_REGION_SIZE { NumTiles: tiles, UseBox: false.into(), Width: 0, Height: 0, Depth: 0 };
+    let coordinate = D3D12_TILED_RESOURCE_COORDINATE {
+        X: 0,
+        Y: 0,
+        Z: 0,
+        Subresource: k,
+    };
+    let size = D3D12_TILE_REGION_SIZE {
+        NumTiles: tiles,
+        UseBox: false.into(),
+        Width: 0,
+        Height: 0,
+        Depth: 0,
+    };
     let flags = D3D12_TILE_RANGE_FLAG_NONE;
     let offset = 0u32;
     // SAFETY: our texture and heap; one region and one range, as counted.
@@ -2362,8 +2488,12 @@ fn reserved_texture(
             D3D12_TILE_MAPPING_FLAG_NONE,
         );
         // The texture keeps its heap, and says what it skips.
-        if texture.SetPrivateDataInterface(&SKIP_HEAP_GUID, &heap).is_err()
-            || texture.SetPrivateData(&SKIP_GUID, 4, Some((&raw const k).cast())).is_err()
+        if texture
+            .SetPrivateDataInterface(&SKIP_HEAP_GUID, &heap)
+            .is_err()
+            || texture
+                .SetPrivateData(&SKIP_GUID, 4, Some((&raw const k).cast()))
+                .is_err()
         {
             return None;
         }
@@ -2373,13 +2503,19 @@ fn reserved_texture(
     static MADE: AtomicU64 = AtomicU64::new(0);
     let saved = SAVED.fetch_add(u64::from(start) * 65536, Relaxed) + u64::from(start) * 65536;
     if MADE.fetch_add(1, Relaxed).is_power_of_two() {
-        tracing::info!(textures = MADE.load(Relaxed), saved_mb = saved >> 20, "textures without their top levels");
+        tracing::info!(
+            textures = MADE.load(Relaxed),
+            saved_mb = saved >> 20,
+            "textures without their top levels"
+        );
     }
     Some(texture)
 }
 
 /// How many top levels of `texture` have no memory (`VICTORY_TEXTURE_SKIP_MIPS`).
-pub(crate) fn skipped_mips(texture: &windows::Win32::Graphics::Direct3D12::ID3D12Resource) -> Option<u32> {
+pub(crate) fn skipped_mips(
+    texture: &windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+) -> Option<u32> {
     let mut k = 0u32;
     let mut size = 4u32;
     // SAFETY: our own private data, four bytes.
@@ -2400,7 +2536,11 @@ pub(crate) fn clamp_to_backed(
     let own = unsafe { texture.GetDesc() };
     let levels = u32::from(own.MipLevels);
     let reaches = |first: u32, count: u32| {
-        let last = if count == u32::MAX { levels.saturating_sub(1) } else { (first + count).saturating_sub(1) };
+        let last = if count == u32::MAX {
+            levels.saturating_sub(1)
+        } else {
+            (first + count).saturating_sub(1)
+        };
         last >= k
     };
     match desc {
@@ -2448,7 +2588,10 @@ pub(crate) fn host_tiled(this: This) -> Option<OnDemand> {
     if this.is_null() || !crate::tiles::wanted() {
         return None;
     }
-    hosted(this, false).map(|(host, _)| host).filter(|host| host.tiled.is_some()).map(OnDemand)
+    hosted(this, false)
+        .map(|(host, _)| host)
+        .filter(|host| host.tiled.is_some())
+        .map(OnDemand)
 }
 
 /// The first level a view of title texture `this` may show, if its host
@@ -2838,6 +2981,7 @@ static PLACED_TWINS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 
 /// See [`PLACED_TWINS`].
 #[cfg(windows)]
+#[allow(dead_code)]
 pub(crate) fn placed_filler_twins() -> u64 {
     PLACED_TWINS.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -2864,7 +3008,9 @@ pub(crate) fn texture_at_made(address: u64, desc: &[u32; 14]) -> Option<This> {
     key[1] = 0;
     key[13] = 0;
     let map = PLACED_TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
-    let found = map.get(&(address, key)).or_else(|| map.get(&(address, *desc)))?;
+    let found = map
+        .get(&(address, key))
+        .or_else(|| map.get(&(address, *desc)))?;
     Some(*found as This)
 }
 
@@ -2892,12 +3038,14 @@ pub(crate) fn texture_at(address: u64, desc: &[u32; 14]) -> Option<This> {
     if raw != key {
         let mut seen = PLACED_RAW.lock().unwrap_or_else(|e| e.into_inner());
         if seen.insert((address, raw)) {
-            let others = seen.range((address, [0; 14])..=(address, [u32::MAX; 14])).filter(|(_, r)| {
-                let mut blank = *r;
-                blank[1] = 0;
-                blank[13] = 0;
-                blank == key
-            });
+            let others = seen
+                .range((address, [0; 14])..=(address, [u32::MAX; 14]))
+                .filter(|(_, r)| {
+                    let mut blank = *r;
+                    blank[1] = 0;
+                    blank[13] = 0;
+                    blank == key
+                });
             if others.count() > 1 {
                 PLACED_TWINS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }

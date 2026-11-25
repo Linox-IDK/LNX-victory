@@ -84,10 +84,10 @@ mod bitcode;
 mod container;
 #[cfg(all(test, windows))]
 mod diff_tests;
-#[cfg(all(test, windows))]
-mod intersect_tests;
 #[cfg(all(windows, any(test, feature = "host")))]
 pub mod host;
+#[cfg(all(test, windows))]
+mod intersect_tests;
 mod lower;
 mod own_bits;
 mod rect;
@@ -100,22 +100,22 @@ pub mod validator;
 mod valu_tests;
 #[cfg(all(test, windows))]
 mod waterfall_tests;
+mod wave;
 #[cfg(all(test, windows))]
 mod wave64_tests;
-mod wave;
 
 use crate::dxbc::{Container, FourCC};
 use crate::native::{HwStage, NativeProgram, RootType};
 use crate::{ShaderError, io, ir, resource, structure};
 
 pub use bitcode::census;
-pub use sampler::StaticSampler;
 pub use lower::{host_max_wave, set_host_max_wave};
 pub use rect::rect_list_gs;
+pub use sampler::StaticSampler;
 pub use shader::{
-    MEMORY_FAULTS, MEMORY_PAGES, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_MEMORY, SLOT_STRIDES,
-    SLOT_STRIDES_COUNT, USER_DATA_SPACE, USER_DISPATCH_THREADS_X, USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS,
-    set_view_heap_limit, view_heap_limit,
+    MEMORY_FAULTS, MEMORY_PAGES, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_MEMORY,
+    SLOT_STRIDES, SLOT_STRIDES_COUNT, USER_DATA_SPACE, USER_DISPATCH_THREADS_X, USER_MEMORY_BASE,
+    USER_VIEW_ADDRESS, USER_VIEW_BIAS, set_view_heap_limit, view_heap_limit,
 };
 
 /// The loop limit without an override: 2^20.
@@ -216,7 +216,10 @@ pub fn translation_fingerprint() -> Vec<u8> {
     out.extend_from_slice(env!("VICTORY_SHADER_SOURCE_HASH").as_bytes());
     out.push(u8::from(cfg!(feature = "diagnostics")));
     out.push(u8::from(cfg!(debug_assertions)));
-    for name in env!("VICTORY_SHADER_SWITCHES").split(',').filter(|n| !n.is_empty()) {
+    for name in env!("VICTORY_SHADER_SWITCHES")
+        .split(',')
+        .filter(|n| !n.is_empty())
+    {
         out.extend_from_slice(name.as_bytes());
         out.push(b'=');
         if let Some(value) = std::env::var_os(name) {
@@ -410,7 +413,9 @@ pub fn emit(
             Ok(()) => true,
             Err((offset, what)) => {
                 if why {
-                    eprintln!("WAVE64-RETRY local waves: not the allocation idiom at {offset:#x}: {what}");
+                    eprintln!(
+                        "WAVE64-RETRY local waves: not the allocation idiom at {offset:#x}: {what}"
+                    );
                 }
                 false
             }
@@ -454,7 +459,11 @@ pub fn emit(
                 // lane runs, where the two host waves can exchange.
                 // (`VICTORY_WAVE_DEEP_SKIPS=0` and `VICTORY_WAVE_WIDE=0` turn the two off.)
                 let deep_on = std::env::var_os("VICTORY_WAVE_DEEP_SKIPS").is_none_or(|v| v != "0");
-                let deep = if deep_on { form(ir::without_skips(p, true)) } else { None };
+                let deep = if deep_on {
+                    form(ir::without_skips(p, true))
+                } else {
+                    None
+                };
                 if let Some((p, st, io, res)) = &deep {
                     let again = emit_program(c, native, p, st, io, res);
                     report("without skips, scalars followed", &again);
@@ -492,7 +501,13 @@ pub fn emit(
                     && idiom(p, st) == exact
                 {
                     let local = lower::with_local_waves(|| emit_program(c, native, p, st, io, res));
-                    report(&format!("local waves ({}), {name}", if exact { "idiom" } else { "APPROXIMATE" }), &local);
+                    report(
+                        &format!(
+                            "local waves ({}), {name}",
+                            if exact { "idiom" } else { "APPROXIMATE" }
+                        ),
+                        &local,
+                    );
                     if done(&local) {
                         return local.map(|(shader, _)| shader);
                     }
@@ -500,7 +515,14 @@ pub fn emit(
             }
             if idiom(p, st) == exact {
                 let local = lower::with_local_waves(|| emit_program(c, native, p, st, io, res));
-                report(if exact { "local waves (idiom)" } else { "local waves (APPROXIMATE)" }, &local);
+                report(
+                    if exact {
+                        "local waves (idiom)"
+                    } else {
+                        "local waves (APPROXIMATE)"
+                    },
+                    &local,
+                );
                 if done(&local) {
                     return local.map(|(shader, _)| shader);
                 }
@@ -511,8 +533,12 @@ pub fn emit(
             if !strict {
                 for (name, f) in &forms {
                     if let Some((p, st, io, res)) = f {
-                        let local = lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res));
-                        report(&format!("local waves (APPROXIMATE, any mask), {name}"), &local);
+                        let local =
+                            lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res));
+                        report(
+                            &format!("local waves (APPROXIMATE, any mask), {name}"),
+                            &local,
+                        );
                         if done(&local) {
                             return local.map(|(shader, _)| shader);
                         }
@@ -622,7 +648,10 @@ fn widen(
             .collect();
         if more.is_empty() {
             if why {
-                eprintln!("WAVE64-WIDE stopped with {} branches wave-wide: a branch around it cannot be", wide.len());
+                eprintln!(
+                    "WAVE64-WIDE stopped with {} branches wave-wide: a branch around it cannot be",
+                    wide.len()
+                );
             }
             return r;
         }
@@ -1166,11 +1195,19 @@ mod tests {
         // v1 = s0 + v0; v2 = v0 << 2; ds_bpermute_b32 v1, v2, v1 offset 128;
         // s_mov_b64 exec, s[12:13]
         let body: [u32; 8] = [
-            0x7D88_0000, 0xBE8C_246A, 0xBF88_0004, 0x4A02_0000, 0x3404_0082, 0xDACC_0080,
-            0x0100_0102, 0xBEFE_040C,
+            0x7D88_0000,
+            0xBE8C_246A,
+            0xBF88_0004,
+            0x4A02_0000,
+            0x3404_0082,
+            0xDACC_0080,
+            0x0100_0102,
+            0xBEFE_040C,
         ];
         // (the same program as `stores_v1`, kept whole for the two structures)
-        use crate::native::{HwStage, NativeProgram, RootParam, ResourceType, RootType, UsedResource};
+        use crate::native::{
+            HwStage, NativeProgram, ResourceType, RootParam, RootType, UsedResource,
+        };
         let mut words = vec![0xBE81_0380, 0xF408_0200, 0xFA00_0000];
         words.extend_from_slice(&body);
         words.extend_from_slice(&[0x3406_0082, 0xE070_1000, 0x8002_0103, 0xBF81_0000]);
@@ -1204,7 +1241,12 @@ mod tests {
         };
         let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
         let branch = (0..p.blocks.len())
-            .find(|&b| p.blocks[b].insts.last().is_some_and(|i| i.name() == "s_cbranch_execz"))
+            .find(|&b| {
+                p.blocks[b]
+                    .insts
+                    .last()
+                    .is_some_and(|i| i.name() == "s_cbranch_execz")
+            })
             .expect("the branch");
         lower::take_needs();
         let was = lower::TEST_HOST_WAVE.replace(Some(32));
@@ -1230,7 +1272,10 @@ mod tests {
                 if *what == "a lane permute across two host waves where not every lane runs"
         ));
         let st = structure::structure(&p).unwrap();
-        assert_eq!(lower::branches_around(&st, &lower::take_needs()), Some(vec![branch]));
+        assert_eq!(
+            lower::branches_around(&st, &lower::take_needs()),
+            Some(vec![branch])
+        );
         // wave-wide: every lane runs the permute (EXEC stays a guard on it)
         let st = structure::structure_wide(&p, &std::collections::HashSet::from([branch])).unwrap();
         let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
@@ -1292,11 +1337,19 @@ mod tests {
         // v1 = s0 + v0; v2 = v0 << 2; ds_permute_b32 v1, v2, v1 offset 128;
         // s_mov_b64 exec, s[12:13]
         let body: [u32; 8] = [
-            0x7D88_0000, 0xBE8C_246A, 0xBF88_0004, 0x4A02_0000, 0x3404_0082, 0xDAC8_0080,
-            0x0100_0102, 0xBEFE_040C,
+            0x7D88_0000,
+            0xBE8C_246A,
+            0xBF88_0004,
+            0x4A02_0000,
+            0x3404_0082,
+            0xDAC8_0080,
+            0x0100_0102,
+            0xBEFE_040C,
         ];
         // (the same program as `stores_v1`, kept whole for the two structures)
-        use crate::native::{HwStage, NativeProgram, RootParam, ResourceType, RootType, UsedResource};
+        use crate::native::{
+            HwStage, NativeProgram, ResourceType, RootParam, RootType, UsedResource,
+        };
         let mut words = vec![0xBE81_0380, 0xF408_0200, 0xFA00_0000];
         words.extend_from_slice(&body);
         words.extend_from_slice(&[0x3406_0082, 0xE070_1000, 0x8002_0103, 0xBF81_0000]);
@@ -1330,7 +1383,12 @@ mod tests {
         };
         let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
         let branch = (0..p.blocks.len())
-            .find(|&b| p.blocks[b].insts.last().is_some_and(|i| i.name() == "s_cbranch_execz"))
+            .find(|&b| {
+                p.blocks[b]
+                    .insts
+                    .last()
+                    .is_some_and(|i| i.name() == "s_cbranch_execz")
+            })
             .expect("the branch");
         lower::take_needs();
         let was = lower::TEST_HOST_WAVE.replace(Some(32));
@@ -1356,7 +1414,10 @@ mod tests {
                 if *what == "a lane permute across two host waves where not every lane runs"
         ));
         let st = structure::structure(&p).unwrap();
-        assert_eq!(lower::branches_around(&st, &lower::take_needs()), Some(vec![branch]));
+        assert_eq!(
+            lower::branches_around(&st, &lower::take_needs()),
+            Some(vec![branch])
+        );
         // wave-wide: every lane runs the permute (EXEC stays a guard on it)
         let st = structure::structure_wide(&p, &std::collections::HashSet::from([branch])).unwrap();
         let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();

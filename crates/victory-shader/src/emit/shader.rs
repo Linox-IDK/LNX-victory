@@ -452,7 +452,14 @@ impl Shader {
         let index = if !sampler && limit != 0 {
             let null = self.m.i32(limit);
             let i32t = self.t.i32;
-            let v = self.op(block, "binary.i32", Attr::ReadNone, i32t, 40, &[index, null]);
+            let v = self.op(
+                block,
+                "binary.i32",
+                Attr::ReadNone,
+                i32t,
+                40,
+                &[index, null],
+            );
             self.m.tag(v, super::bitcode::Tag::Clamp);
             v
         } else if sampler {
@@ -463,7 +470,14 @@ impl Shader {
             // heap smaller than 2,048 would need.
             let last = self.m.i32(2047);
             let i32t = self.t.i32;
-            let v = self.op(block, "binary.i32", Attr::ReadNone, i32t, 40, &[index, last]);
+            let v = self.op(
+                block,
+                "binary.i32",
+                Attr::ReadNone,
+                i32t,
+                40,
+                &[index, last],
+            );
             self.m.tag(v, super::bitcode::Tag::Clamp);
             v
         } else {
@@ -991,7 +1005,15 @@ fn reconcile_row_interp(elems: &mut [SigElement]) {
 mod tests {
     use super::*;
 
-    fn elem(name: &str, kind: u8, comp: u8, interp: u8, row: u32, col: u8, usage: u8) -> SigElement {
+    fn elem(
+        name: &str,
+        kind: u8,
+        comp: u8,
+        interp: u8,
+        row: u32,
+        col: u8,
+        usage: u8,
+    ) -> SigElement {
         SigElement {
             name: name.into(),
             index: 0,

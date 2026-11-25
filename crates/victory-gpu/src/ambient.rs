@@ -60,7 +60,11 @@ pub(crate) fn level() -> Option<f32> {
         if set.trim() == "off" {
             return -1.0;
         }
-        set.trim().parse().ok().filter(|l: &f32| l.is_finite() && *l >= 0.0).unwrap_or(DEFAULT)
+        set.trim()
+            .parse()
+            .ok()
+            .filter(|l: &f32| l.is_finite() && *l >= 0.0)
+            .unwrap_or(DEFAULT)
     });
     (level >= 0.0).then_some(level)
 }
@@ -217,48 +221,58 @@ fn live_level() -> Option<f32> {
         if !cfg!(feature = "diagnostics") {
             return;
         }
-        let Some(file) = std::env::var_os("VICTORY_AMBIENT_FILE") else { return };
-        let _ = std::thread::Builder::new().name("victory-ambient".into()).spawn(move || {
-            loop {
-                let read: Vec<f32> = std::fs::read_to_string(&file)
-                    .unwrap_or_default()
-                    .split_whitespace()
-                    .filter_map(|v| v.parse().ok())
-                    .collect();
-                if let [gain, least, ref rest @ ..] = read[..]
-                    && matches!(rest.len(), 0 | 4)
-                {
-                    if let [s, r, n, t] = rest[..] {
-                        *SHADE.lock().unwrap_or_else(|e| e.into_inner()) = Some([s, r, n, t]);
-                    }
-                    let new = Some(Some([gain, least]));
-                    let mut follow = FOLLOW.lock().unwrap_or_else(|e| e.into_inner());
-                    if *follow != new {
-                        tracing::info!(gain, least, "ambient light follows the sky, set from the file");
-                        *follow = new;
-                    }
-                } else if let [level, r, g, b, ref rest @ ..] = read[..] {
-                    *FOLLOW.lock().unwrap_or_else(|e| e.into_inner()) = Some(None);
-                    if let [s, r, n, t, ref last @ ..] = rest[..] {
-                        *SHADE.lock().unwrap_or_else(|e| e.into_inner()) = Some([s, r, n, t]);
-                        if let [k, ref floor @ ..] = last[..] {
-                            *KEEP.lock().unwrap_or_else(|e| e.into_inner()) = Some(k.max(0.0));
-                            *LEAST.lock().unwrap_or_else(|e| e.into_inner()) =
-                                floor.first().map_or(0.0, |f| f.max(0.0));
+        let Some(file) = std::env::var_os("VICTORY_AMBIENT_FILE") else {
+            return;
+        };
+        let _ = std::thread::Builder::new()
+            .name("victory-ambient".into())
+            .spawn(move || {
+                loop {
+                    let read: Vec<f32> = std::fs::read_to_string(&file)
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .filter_map(|v| v.parse().ok())
+                        .collect();
+                    if let [gain, least, ref rest @ ..] = read[..]
+                        && matches!(rest.len(), 0 | 4)
+                    {
+                        if let [s, r, n, t] = rest[..] {
+                            *SHADE.lock().unwrap_or_else(|e| e.into_inner()) = Some([s, r, n, t]);
+                        }
+                        let new = Some(Some([gain, least]));
+                        let mut follow = FOLLOW.lock().unwrap_or_else(|e| e.into_inner());
+                        if *follow != new {
+                            tracing::info!(
+                                gain,
+                                least,
+                                "ambient light follows the sky, set from the file"
+                            );
+                            *follow = new;
+                        }
+                    } else if let [level, r, g, b, ref rest @ ..] = read[..] {
+                        *FOLLOW.lock().unwrap_or_else(|e| e.into_inner()) = Some(None);
+                        if let [s, r, n, t, ref last @ ..] = rest[..] {
+                            *SHADE.lock().unwrap_or_else(|e| e.into_inner()) = Some([s, r, n, t]);
+                            if let [k, ref floor @ ..] = last[..] {
+                                *KEEP.lock().unwrap_or_else(|e| e.into_inner()) = Some(k.max(0.0));
+                                *LEAST.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    floor.first().map_or(0.0, |f| f.max(0.0));
+                            }
+                        }
+                        let new = Some((level.max(0.0), [r, g, b]));
+                        let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+                        if *live != new {
+                            tracing::info!(level, r, g, b, "ambient light set from the file");
+                            *live = new;
                         }
                     }
-                    let new = Some((level.max(0.0), [r, g, b]));
-                    let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
-                    if *live != new {
-                        tracing::info!(level, r, g, b, "ambient light set from the file");
-                        *live = new;
-                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-        });
+            });
     });
-    LIVE.lock().unwrap_or_else(|e| e.into_inner()).map(|(level, _)| level)
+    LIVE.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map(|(level, _)| level)
 }
 
 const SOURCE: &str = r#"
@@ -468,7 +482,13 @@ pub(crate) fn raise_read(list: &HostList, light: This) -> bool {
         let d = unsafe { t.GetDesc() };
         if d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0 {
             static SAID: std::sync::Once = std::sync::Once::new();
-            SAID.call_once(|| tracing::warn!(width = d.Width, height = d.Height, "skin: the atlas cannot be written (no unordered access)"));
+            SAID.call_once(|| {
+                tracing::warn!(
+                    width = d.Width,
+                    height = d.Height,
+                    "skin: the atlas cannot be written (no unordered access)"
+                )
+            });
             return false;
         }
     }
@@ -533,12 +553,15 @@ fn record(list: &HostList, light: This, depth: Option<This>, held: f32) -> bool 
     });
     static FOLLOWS: std::sync::Once = std::sync::Once::new();
     if let Some((t, f)) = sky {
-        FOLLOWS.call_once(|| tracing::info!(gain = f[0], least = f[1], "ambient light follows the sky"));
+        FOLLOWS.call_once(|| {
+            tracing::info!(gain = f[0], least = f[1], "ambient light follows the sky")
+        });
         list.keep(t);
         crate::list::ensure_state(
             list,
             sky_image,
-            (D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0 | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0) as u32,
+            (D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0
+                | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0) as u32,
         );
     }
     list.keep(light);
@@ -575,21 +598,33 @@ fn record(list: &HostList, light: This, depth: Option<This>, held: f32) -> bool 
             ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
             Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
             Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
-                Texture2D: D3D12_TEX2D_SRV { MipLevels: 1, ..Default::default() },
+                Texture2D: D3D12_TEX2D_SRV {
+                    MipLevels: 1,
+                    ..Default::default()
+                },
             },
         };
-        let beside = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: at.ptr + pass.step as usize };
-        host.device.CreateShaderResourceView(depth, Some(&seen), beside);
+        let beside = D3D12_CPU_DESCRIPTOR_HANDLE {
+            ptr: at.ptr + pass.step as usize,
+        };
+        host.device
+            .CreateShaderResourceView(depth, Some(&seen), beside);
         let around = D3D12_SHADER_RESOURCE_VIEW_DESC {
             Format: DXGI_FORMAT_R11G11B10_FLOAT,
             ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
             Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
             Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
-                Texture2D: D3D12_TEX2D_SRV { MipLevels: 1, ..Default::default() },
+                Texture2D: D3D12_TEX2D_SRV {
+                    MipLevels: 1,
+                    ..Default::default()
+                },
             },
         };
-        let third = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: at.ptr + 2 * pass.step as usize };
-        host.device.CreateShaderResourceView(sky.map(|(t, _)| t), Some(&around), third);
+        let third = D3D12_CPU_DESCRIPTOR_HANDLE {
+            ptr: at.ptr + 2 * pass.step as usize,
+        };
+        host.device
+            .CreateShaderResourceView(sky.map(|(t, _)| t), Some(&around), third);
         l.SetDescriptorHeaps(&[Some(pass.views.clone())]);
         l.SetComputeRootSignature(&pass.root);
         l.SetPipelineState(&pass.pso);
@@ -599,7 +634,9 @@ fn record(list: &HostList, light: This, depth: Option<This>, held: f32) -> bool 
         let strength = if depth.is_some() { strength } else { 0.0 };
         let [gain, least] = sky.map_or([0.0, 0.0], |(_, f)| f);
         let floor = *LEAST.lock().unwrap_or_else(|e| e.into_inner());
-        let constants = [level, r, g, b, strength, radius, near, tan_y, gain, least, held, floor];
+        let constants = [
+            level, r, g, b, strength, radius, near, tan_y, gain, least, held, floor,
+        ];
         l.SetComputeRoot32BitConstants(0, 12, constants.as_ptr().cast(), 0);
         l.SetComputeRootDescriptorTable(
             1,
@@ -611,18 +648,6 @@ fn record(list: &HostList, light: This, depth: Option<This>, held: f32) -> bool 
     }
     uav_barrier(l);
     true
-}
-
-#[cfg(test)]
-mod tests {
-    /// The pass compiles with the system's compiler and the host takes it.
-    #[test]
-    fn ambient_pass_builds() {
-        let Some(host) = crate::host::host() else {
-            return;
-        };
-        super::make(&host.device).expect("the ambient pass");
-    }
 }
 
 /// LNX: an array of light images (the probes' 13-layer array skin reads, root parameter 1,
@@ -663,10 +688,15 @@ void main(uint3 at : SV_DispatchThreadID) {
 /// The mode of [`SKIN_LAYERS`]: `Some(first_only)`, or `None` when off.
 pub(crate) fn skin_layers() -> Option<bool> {
     static MODE: OnceLock<Option<bool>> = OnceLock::new();
-    *MODE.get_or_init(|| match std::env::var("VICTORY_SKIN_LAYERS").unwrap_or_default().trim() {
-        "off" => None,
-        "all" => Some(false),
-        _ => Some(true),
+    *MODE.get_or_init(|| {
+        match std::env::var("VICTORY_SKIN_LAYERS")
+            .unwrap_or_default()
+            .trim()
+        {
+            "off" => None,
+            "all" => Some(false),
+            _ => Some(true),
+        }
     })
 }
 
@@ -700,15 +730,30 @@ pub(crate) fn fill_layers(list: &HostList, array: This, first_only: bool) -> boo
     }
     if d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0 {
         static SAID: std::sync::Once = std::sync::Once::new();
-        SAID.call_once(|| tracing::warn!(width = d.Width, height = d.Height, layers = d.DepthOrArraySize, "skin: the probes' layers cannot be written (no unordered access)"));
+        SAID.call_once(|| {
+            tracing::warn!(
+                width = d.Width,
+                height = d.Height,
+                layers = d.DepthOrArraySize,
+                "skin: the probes' layers cannot be written (no unordered access)"
+            )
+        });
         return false;
     }
     let volume = d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
     static PASS: OnceLock<Option<Pass>> = OnceLock::new();
     static VOLUME: OnceLock<Option<Pass>> = OnceLock::new();
-    let (cell, source) = if volume { (&VOLUME, VOLUME_SOURCE) } else { (&PASS, ARRAY_SOURCE) };
+    let (cell, source) = if volume {
+        (&VOLUME, VOLUME_SOURCE)
+    } else {
+        (&PASS, ARRAY_SOURCE)
+    };
     let Some(pass) = cell
-        .get_or_init(|| make_from(&host.device, source).inspect_err(|e| tracing::warn!(error = %e, "no skin layers")).ok())
+        .get_or_init(|| {
+            make_from(&host.device, source)
+                .inspect_err(|e| tracing::warn!(error = %e, "no skin layers"))
+                .ok()
+        })
         .as_ref()
     else {
         return false;
@@ -728,13 +773,19 @@ pub(crate) fn fill_layers(list: &HostList, array: This, first_only: bool) -> boo
     unsafe {
         let cpu = pass.views.GetCPUDescriptorHandleForHeapStart();
         let gpu = pass.views.GetGPUDescriptorHandleForHeapStart();
-        let at = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: cpu.ptr + (slot * pass.step) as usize };
+        let at = D3D12_CPU_DESCRIPTOR_HANDLE {
+            ptr: cpu.ptr + (slot * pass.step) as usize,
+        };
         let view = if volume {
             D3D12_UNORDERED_ACCESS_VIEW_DESC {
                 Format: DXGI_FORMAT_R32_UINT,
                 ViewDimension: D3D12_UAV_DIMENSION_TEXTURE3D,
                 Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
-                    Texture3D: D3D12_TEX3D_UAV { MipSlice: 0, FirstWSlice: 0, WSize: u32::from(d.DepthOrArraySize) },
+                    Texture3D: D3D12_TEX3D_UAV {
+                        MipSlice: 0,
+                        FirstWSlice: 0,
+                        WSize: u32::from(d.DepthOrArraySize),
+                    },
                 },
             }
         } else {
@@ -751,18 +802,47 @@ pub(crate) fn fill_layers(list: &HostList, array: This, first_only: bool) -> boo
                 },
             }
         };
-        host.device.CreateUnorderedAccessView(t, None::<&ID3D12Resource>, Some(&view), at);
+        host.device
+            .CreateUnorderedAccessView(t, None::<&ID3D12Resource>, Some(&view), at);
         l.SetDescriptorHeaps(&[Some(pass.views.clone())]);
         l.SetComputeRootSignature(&pass.root);
         l.SetPipelineState(&pass.pso);
         let constants = [value, u32::from(first_only)];
         l.SetComputeRoot32BitConstants(0, 2, constants.as_ptr().cast(), 0);
-        l.SetComputeRootDescriptorTable(1, D3D12_GPU_DESCRIPTOR_HANDLE { ptr: gpu.ptr + u64::from(slot * pass.step) });
-        l.Dispatch((d.Width as u32).div_ceil(8), d.Height.div_ceil(8), u32::from(d.DepthOrArraySize));
+        l.SetComputeRootDescriptorTable(
+            1,
+            D3D12_GPU_DESCRIPTOR_HANDLE {
+                ptr: gpu.ptr + u64::from(slot * pass.step),
+            },
+        );
+        l.Dispatch(
+            (d.Width as u32).div_ceil(8),
+            d.Height.div_ceil(8),
+            u32::from(d.DepthOrArraySize),
+        );
     }
     uav_barrier(l);
     crate::list::ensure_state(list, array, READ);
     static SAID: std::sync::Once = std::sync::Once::new();
-    SAID.call_once(|| tracing::info!(first_only, volume, layers = d.DepthOrArraySize, "skin: the probes' layers get the ambient light"));
+    SAID.call_once(|| {
+        tracing::info!(
+            first_only,
+            volume,
+            layers = d.DepthOrArraySize,
+            "skin: the probes' layers get the ambient light"
+        )
+    });
     true
+}
+
+#[cfg(test)]
+mod tests {
+    /// The pass compiles with the system's compiler and the host takes it.
+    #[test]
+    fn ambient_pass_builds() {
+        let Some(host) = crate::host::host() else {
+            return;
+        };
+        super::make(&host.device).expect("the ambient pass");
+    }
 }

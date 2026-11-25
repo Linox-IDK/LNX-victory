@@ -112,7 +112,9 @@ fn split() -> bool {
 #[cfg(windows)]
 pub(crate) fn cuts() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    waits() && split() && *ON.get_or_init(|| std::env::var_os("VICTORY_CUT_WAITS").is_none_or(|v| v != "0"))
+    waits()
+        && split()
+        && *ON.get_or_init(|| std::env::var_os("VICTORY_CUT_WAITS").is_none_or(|v| v != "0"))
 }
 
 /// Whether a present runs what queues still hold (on by default: a wait
@@ -361,7 +363,8 @@ pub(crate) fn behind() -> bool {
 
 /// Whether there is something for [`worker`] to look at.
 #[cfg(windows)]
-static WORK: (std::sync::Mutex<bool>, std::sync::Condvar) = (std::sync::Mutex::new(false), std::sync::Condvar::new());
+static WORK: (std::sync::Mutex<bool>, std::sync::Condvar) =
+    (std::sync::Mutex::new(false), std::sync::Condvar::new());
 
 #[cfg(windows)]
 fn wake() {
@@ -465,10 +468,15 @@ fn release_held_now(all: bool) {
                         // each range shaders write compared once).
                         #[cfg(feature = "diagnostics")]
                         {
-                            let waits = held.iter().take_while(|h| matches!(h, Held::Value(_))).count();
+                            let waits = held
+                                .iter()
+                                .take_while(|h| matches!(h, Held::Value(_)))
+                                .count();
                             if waits > 0
                                 && matches!(held.get(waits), Some(Held::Run(..)))
-                                && held[..waits].iter().all(|h| matches!(h, Held::Value(w) if w.met()))
+                                && held[..waits]
+                                    .iter()
+                                    .all(|h| matches!(h, Held::Value(w) if w.met()))
                             {
                                 crate::copystat::add(crate::copystat::C::PartsTogether, 1);
                             }
@@ -653,7 +661,11 @@ extern "system" fn execute(this: This, count: u32, lists: *const This) {
             if !unmet.is_empty() {
                 static SEEN: AtomicU64 = AtomicU64::new(0);
                 if SEEN.fetch_add(1, Ordering::Relaxed) < 8 {
-                    tracing::info!(kind = queue(this).kind, ?unmet, "a submission is held for a memory value");
+                    tracing::info!(
+                        kind = queue(this).kind,
+                        ?unmet,
+                        "a submission is held for a memory value"
+                    );
                 }
                 lock(&queue(this).held).extend(unmet.into_iter().map(Held::Value));
                 let mut waiting = lock(&WAITING);
@@ -763,11 +775,21 @@ extern "system" fn wait(this: This, fence: This, value: u64) -> HRESULT {
         {
             static CALLS: AtomicU64 = AtomicU64::new(0);
             if CALLS.fetch_add(1, Ordering::Relaxed) < 8 {
-                tracing::info!(kind = queue(this).kind, now, value, "a queue is told to wait for a fence");
+                tracing::info!(
+                    kind = queue(this).kind,
+                    now,
+                    value,
+                    "a queue is told to wait for a fence"
+                );
             }
         }
         #[cfg(feature = "diagnostics")]
-        crate::capture::op(this as usize, || format!("WAIT queue kind {} for fence {fence:?} value {value} (now {now})", queue(this).kind));
+        crate::capture::op(this as usize, || {
+            format!(
+                "WAIT queue kind {} for fence {fence:?} value {value} (now {now})",
+                queue(this).kind
+            )
+        });
         let behind = {
             let mut held = lock(&queue(this).held);
             let behind = !held.is_empty() || now < value;
@@ -909,14 +931,20 @@ extern "system" fn present(
         static LAST: std::sync::Mutex<(u32, usize, u64)> = std::sync::Mutex::new((u32::MAX, 0, 0));
         // SAFETY: the title passes `planes` plane descriptions.
         let first = (planes > 0)
-            .then(|| unsafe { plane_parameters.as_ref() })
+            .then_some(unsafe { plane_parameters.as_ref() })
             .flatten()
             .filter(|p| p.count > 0 && !p.resources.is_null())
             // SAFETY: the plane lists `count` resources.
             .map_or(0, |p| unsafe { *p.resources } as usize);
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
         if last.0 != planes || last.1 != first {
-            tracing::info!(frame, planes, first = format_args!("{first:#x}"), since = frame - last.2, "presented planes changed");
+            tracing::info!(
+                frame,
+                planes,
+                first = format_args!("{first:#x}"),
+                since = frame - last.2,
+                "presented planes changed"
+            );
             *last = (planes, first, frame);
         }
     }
@@ -963,10 +991,20 @@ extern "system" fn present(
     #[cfg(windows)]
     let plane_parameters = {
         static PICK: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
-        let pick = *PICK.get_or_init(|| std::env::var("VICTORY_PRESENT_PLANE").ok().and_then(|v| v.trim().parse().ok()));
+        let pick = *PICK.get_or_init(|| {
+            std::env::var("VICTORY_PRESENT_PLANE")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+        });
         let first_resource = |k: u32| {
             // SAFETY: the title passes `planes` plane descriptions, 0x48 bytes apart.
-            let p = unsafe { plane_parameters.cast::<u8>().add(0x48 * k as usize).cast::<Plane>().as_ref() }?;
+            let p = unsafe {
+                plane_parameters
+                    .cast::<u8>()
+                    .add(0x48 * k as usize)
+                    .cast::<Plane>()
+                    .as_ref()
+            }?;
             // SAFETY: the plane lists `count` resources.
             (p.count > 0 && !p.resources.is_null()).then(|| unsafe { *p.resources })
         };
@@ -977,7 +1015,9 @@ extern "system" fn present(
         {
             return S_OK;
         }
-        let k = pick.unwrap_or(planes.saturating_sub(1)).min(planes.saturating_sub(1));
+        let k = pick
+            .unwrap_or(planes.saturating_sub(1))
+            .min(planes.saturating_sub(1));
         // `VICTORY_GAMMA`: the shown plane goes through our pass to be lifted.
         if planes > 0
             && crate::compose::gamma().is_some()
@@ -986,7 +1026,10 @@ extern "system" fn present(
         {
             return S_OK;
         }
-        plane_parameters.cast::<u8>().wrapping_add(0x48 * k as usize).cast::<Plane>()
+        plane_parameters
+            .cast::<u8>()
+            .wrapping_add(0x48 * k as usize)
+            .cast::<Plane>()
     };
     #[cfg(windows)]
     if planes > 0
@@ -1116,7 +1159,9 @@ extern "system" fn copy_page_mappings(
     }
     if !ok {
         static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| tracing::warn!(pool = format_args!("{pool:#x}"), "a page mapping failed"));
+        ONCE.call_once(|| {
+            tracing::warn!(pool = format_args!("{pool:#x}"), "a page mapping failed")
+        });
     }
     S_OK
 }

@@ -95,7 +95,8 @@ static SHADERS: Mutex<Option<HashMap<[u8; 32], Arc<Shader>>>> = Mutex::new(None)
 
 /// For the memory lines: containers kept and their bytes, translations
 /// kept and the bytes of their host code. None of them is ever let go.
-static KEPT: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+static KEPT: [std::sync::atomic::AtomicU64; 4] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
 /// What the shader table and the pipeline library keep in memory:
 /// containers and their bytes, translations and their bytes, the bytes of
@@ -180,7 +181,10 @@ impl Shader {
                 }
                 if let Ok(t) = &done {
                     KEPT[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    KEPT[3].fetch_add(t.host.dxil.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    KEPT[3].fetch_add(
+                        t.host.dxil.len() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                 }
                 match &done {
                     Ok(t) => tracing::info!(
@@ -300,7 +304,8 @@ fn of_builder(shaders: &[Arc<Shader>]) -> bool {
 pub(crate) fn builder_quarantined(this: This) -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     is_builder(this)
-        && (*ON.get_or_init(|| std::env::var_os("VICTORY_BVH_QUARANTINE").is_some_and(|v| v == "1"))
+        && (*ON
+            .get_or_init(|| std::env::var_os("VICTORY_BVH_QUARANTINE").is_some_and(|v| v == "1"))
             || builder_warming())
 }
 
@@ -314,7 +319,10 @@ pub(crate) fn builder_quarantined(this: This) -> bool {
 fn builder_warming() -> bool {
     static FRAMES: OnceLock<u64> = OnceLock::new();
     let frames = *FRAMES.get_or_init(|| {
-        std::env::var("VICTORY_BVH_WARMUP").ok().and_then(|v| v.parse().ok()).unwrap_or(30)
+        std::env::var("VICTORY_BVH_WARMUP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30)
     });
     if frames == 0 {
         return false;
@@ -325,7 +333,10 @@ fn builder_warming() -> bool {
     let warm = now < started + frames || now < fault + frames;
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !warm && started > 0 && !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        tracing::info!(frame = now, "the ray-tracing structure builder is warm: its stores go back into title memory");
+        tracing::info!(
+            frame = now,
+            "the ray-tracing structure builder is warm: its stores go back into title memory"
+        );
     }
     warm
 }
@@ -342,7 +353,9 @@ pub(crate) fn compute_threads(this: This) -> Option<[u32; 3]> {
     if this.is_null() {
         return None;
     }
-    let [shader] = &pipeline(this).shaders[..] else { return None };
+    let [shader] = &pipeline(this).shaders[..] else {
+        return None;
+    };
     let c = Container::parse(&shader.container).ok()?;
     let programs = victory_shader::native_programs(c.part(FourCC::DXIL)?.data).ok()?;
     programs.iter().find_map(|p| match &p.io {
@@ -363,7 +376,10 @@ pub(crate) fn builder_off(why: &'static str) {
     let mut b = BUILDER.lock().unwrap_or_else(|e| e.into_inner());
     if !b.off {
         b.off = true;
-        tracing::warn!(why, "the ray-tracing structure builder is turned off for the rest of the run: its stages run all or none");
+        tracing::warn!(
+            why,
+            "the ray-tracing structure builder is turned off for the rest of the run: its stages run all or none"
+        );
     }
 }
 
@@ -429,7 +445,10 @@ pub(crate) fn builder_runs(this: This) -> bool {
         "the ray-tracing structure builder runs: all of its programs have host pipelines"
     );
     b.whole = true;
-    BUILDER_STARTED.store(crate::queue::presented().max(1), std::sync::atomic::Ordering::Relaxed);
+    BUILDER_STARTED.store(
+        crate::queue::presented().max(1),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     true
 }
 
@@ -590,7 +609,10 @@ pub(crate) fn note_drop(this: This) {
 pub(crate) fn note_why(why: String) {
     crate::capture::op(0, || format!("DROPPED {why}"));
     let mut drops = DROPS.lock().unwrap_or_else(|e| e.into_inner());
-    *drops.get_or_insert_with(HashMap::new).entry(why).or_default() += 1;
+    *drops
+        .get_or_insert_with(HashMap::new)
+        .entry(why)
+        .or_default() += 1;
 }
 
 /// The drops counted since the last call, most first (diagnostics).

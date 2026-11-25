@@ -69,7 +69,9 @@ pub fn run(
     // (upstream 0b35b7f) The host's PC FidelityFX upscaler in place of the console's.
     #[cfg(windows)]
     victory_hle::modules::fidelityfx::use_host_dir(
-        std::env::var_os("VICTORY_FIDELITYFX_DIR").map(std::path::PathBuf::from).as_deref(),
+        std::env::var_os("VICTORY_FIDELITYFX_DIR")
+            .map(std::path::PathBuf::from)
+            .as_deref(),
     );
     victory_hle::console::set(match console {
         Console::SeriesX => victory_hle::console::Console::SeriesX,

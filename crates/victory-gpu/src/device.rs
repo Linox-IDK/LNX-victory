@@ -377,7 +377,9 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
             let mut bytes = [0u8; 128];
             (at != 0 && crate::host::read_into(at as *const u8, &mut bytes)).then(|| {
                 bytes
-                    .as_chunks::<8>().0.iter()
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
                     .map(|c| c.iter().rev().fold(0u64, |v, &b| v << 8 | u64::from(b)))
                     .collect()
             })
@@ -392,7 +394,7 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
             let dir = std::path::PathBuf::from(dir);
             let _ = std::fs::create_dir_all(&dir);
             let mut raw = [0u8; 128];
-            if crate::host::read_into(desc as *const u8, &mut raw) {
+            if crate::host::read_into(desc, &mut raw) {
                 let _ = std::fs::write(dir.join(format!("{SLOT:x}_{calls}_desc.bin")), raw);
             }
             for k in 0..w.len().saturating_sub(1) {
@@ -402,13 +404,14 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
                 }
                 let mut bytes = vec![0u8; len];
                 if crate::host::read_into(at as *const u8, &mut bytes) {
-                    let _ = std::fs::write(dir.join(format!("{SLOT:x}_{calls}_w{k}_{at:x}_{len:x}.bin")), &bytes);
+                    let _ = std::fs::write(
+                        dir.join(format!("{SLOT:x}_{calls}_w{k}_{at:x}_{len:x}.bin")),
+                        &bytes,
+                    );
                 }
             }
         }
-        let first = description
-            .as_ref()
-            .and_then(|w| words(w[0] as usize));
+        let first = description.as_ref().and_then(|w| words(w[0] as usize));
         tracing::warn!(
             slot = format_args!("{:#x}", SLOT),
             calls,

@@ -72,12 +72,29 @@ fn make() -> windows::core::Result<Compose> {
     let mut errors: Option<ID3DBlob> = None;
     // SAFETY: the source and names live through the call; out pointers ours.
     let compiled = unsafe {
-        D3DCompile(SOURCE.as_ptr().cast(), SOURCE.len(), s!("compose"), None, None, s!("main"), s!("cs_5_1"), 0, 0, &mut code, Some(&mut errors))
+        D3DCompile(
+            SOURCE.as_ptr().cast(),
+            SOURCE.len(),
+            s!("compose"),
+            None,
+            None,
+            s!("main"),
+            s!("cs_5_1"),
+            0,
+            0,
+            &mut code,
+            Some(&mut errors),
+        )
     };
     if let Err(e) = compiled {
         if let Some(errors) = errors {
             // SAFETY: the blob's own bytes.
-            let text = unsafe { std::slice::from_raw_parts(errors.GetBufferPointer().cast::<u8>(), errors.GetBufferSize()) };
+            let text = unsafe {
+                std::slice::from_raw_parts(
+                    errors.GetBufferPointer().cast::<u8>(),
+                    errors.GetBufferSize(),
+                )
+            };
             tracing::warn!("plane composition: {}", String::from_utf8_lossy(text));
         }
         return Err(e);
@@ -85,23 +102,34 @@ fn make() -> windows::core::Result<Compose> {
     let code = code.ok_or_else(windows::core::Error::empty)?;
     // SAFETY: plain object creation; the blob's own bytes (root signature inside).
     unsafe {
-        let bytes = std::slice::from_raw_parts(code.GetBufferPointer().cast::<u8>(), code.GetBufferSize());
+        let bytes =
+            std::slice::from_raw_parts(code.GetBufferPointer().cast::<u8>(), code.GetBufferSize());
         let root: ID3D12RootSignature = device.CreateRootSignature(0, bytes)?;
-        let pso: ID3D12PipelineState = device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
-            pRootSignature: std::mem::transmute_copy(&root),
-            CS: D3D12_SHADER_BYTECODE { pShaderBytecode: bytes.as_ptr().cast(), BytecodeLength: bytes.len() },
-            ..Default::default()
-        })?;
-        let heap: ID3D12DescriptorHeap = device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
-            Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-            NumDescriptors: 3,
-            Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
-            NodeMask: 0,
-        })?;
-        let increment = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) as usize;
+        let pso: ID3D12PipelineState =
+            device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                pRootSignature: std::mem::transmute_copy(&root),
+                CS: D3D12_SHADER_BYTECODE {
+                    pShaderBytecode: bytes.as_ptr().cast(),
+                    BytecodeLength: bytes.len(),
+                },
+                ..Default::default()
+            })?;
+        let heap: ID3D12DescriptorHeap =
+            device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                NumDescriptors: 3,
+                Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                NodeMask: 0,
+            })?;
+        let increment = device
+            .GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+            as usize;
         let mut output: Option<ID3D12Resource> = None;
         device.CreateCommittedResource(
-            &D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() },
+            &D3D12_HEAP_PROPERTIES {
+                Type: D3D12_HEAP_TYPE_DEFAULT,
+                ..Default::default()
+            },
             D3D12_HEAP_FLAG_NONE,
             &D3D12_RESOURCE_DESC {
                 Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
@@ -110,7 +138,10 @@ fn make() -> windows::core::Result<Compose> {
                 DepthOrArraySize: 1,
                 MipLevels: 1,
                 Format: DXGI_FORMAT_R8G8B8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
                 Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                 ..Default::default()
             },
@@ -134,7 +165,14 @@ fn make() -> windows::core::Result<Compose> {
         let list = host.new_list()?;
         list.close();
         tracing::info!("Series S planes: composed into one 1080p image");
-        Ok(Compose { root, pso, heap, increment, output, list })
+        Ok(Compose {
+            root,
+            pso,
+            heap,
+            increment,
+            output,
+            list,
+        })
     }
 }
 
@@ -144,7 +182,8 @@ fn view(c: &Compose, resource: This, texture: &ID3D12Resource, slot: usize) {
     // SAFETY: a live resource; our heap.
     unsafe {
         let desc = texture.GetDesc();
-        let format = crate::resource::view_format(resource).map_or(desc.Format, |f| DXGI_FORMAT(f as i32));
+        let format =
+            crate::resource::view_format(resource).map_or(desc.Format, |f| DXGI_FORMAT(f as i32));
         let mut cpu = c.heap.GetCPUDescriptorHandleForHeapStart();
         cpu.ptr += slot * c.increment;
         device.CreateShaderResourceView(
@@ -153,7 +192,12 @@ fn view(c: &Compose, resource: This, texture: &ID3D12Resource, slot: usize) {
                 Format: format,
                 ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
                 Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 { Texture2D: D3D12_TEX2D_SRV { MipLevels: 1, ..Default::default() } },
+                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                    Texture2D: D3D12_TEX2D_SRV {
+                        MipLevels: 1,
+                        ..Default::default()
+                    },
+                },
             }),
             cpu,
         );
@@ -167,7 +211,12 @@ fn view(c: &Compose, resource: This, texture: &ID3D12Resource, slot: usize) {
 pub(crate) fn gamma() -> Option<f32> {
     static G: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
     *G.get_or_init(|| {
-        let g = std::env::var("VICTORY_GAMMA").ok()?.trim().parse::<f32>().ok().filter(|g| (0.5..=3.0).contains(g))?;
+        let g = std::env::var("VICTORY_GAMMA")
+            .ok()?
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|g| (0.5..=3.0).contains(g))?;
         tracing::info!(gamma = g, "presented image lifted by a gamma");
         Some(g)
     })
@@ -188,25 +237,58 @@ pub(crate) fn present_one(world: This, frame: u64) -> bool {
 fn run(world: This, ui: Option<This>, frame: u64) -> bool {
     let single = ui.is_none();
     let ui = ui.unwrap_or(world);
-    let (Some(c), Some(host)) = (compose(), host()) else { return false };
-    let (Some(w_tex), Some(u_tex)) = (crate::resource::host_resource(world), crate::resource::host_resource(ui)) else {
+    let (Some(c), Some(host)) = (compose(), host()) else {
+        return false;
+    };
+    let (Some(w_tex), Some(u_tex)) = (
+        crate::resource::host_resource(world),
+        crate::resource::host_resource(ui),
+    ) else {
         return false;
     };
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     const READ: u32 = 0x40; // non-pixel shader resource
     let w_state = crate::resource::host_transition(world, READ).map_or(READ, |(_, before)| before);
-    let u_state =
-        if single { w_state } else { crate::resource::host_transition(ui, READ).map_or(READ, |(_, before)| before) };
+    let u_state = if single {
+        w_state
+    } else {
+        crate::resource::host_transition(ui, READ).map_or(READ, |(_, before)| before)
+    };
     view(c, world, w_tex, 0);
     view(c, ui, u_tex, 1);
     c.list.reset();
     let l = &c.list.list;
-    let to_read = |t: &ID3D12Resource, s: u32| (s != READ).then(|| transition(t, D3D12_RESOURCE_STATES(s as i32), D3D12_RESOURCE_STATES(READ as i32)));
-    let back = |t: &ID3D12Resource, s: u32| (s != READ).then(|| transition(t, D3D12_RESOURCE_STATES(READ as i32), D3D12_RESOURCE_STATES(s as i32)));
+    let to_read = |t: &ID3D12Resource, s: u32| {
+        (s != READ).then(|| {
+            transition(
+                t,
+                D3D12_RESOURCE_STATES(s as i32),
+                D3D12_RESOURCE_STATES(READ as i32),
+            )
+        })
+    };
+    let back = |t: &ID3D12Resource, s: u32| {
+        (s != READ).then(|| {
+            transition(
+                t,
+                D3D12_RESOURCE_STATES(READ as i32),
+                D3D12_RESOURCE_STATES(s as i32),
+            )
+        })
+    };
     // SAFETY: an open list; our objects and the planes' live host copies.
     unsafe {
-        let before: Vec<D3D12_RESOURCE_BARRIER> =
-            [to_read(w_tex, w_state), if single { None } else { to_read(u_tex, u_state) }].into_iter().flatten().collect();
+        let before: Vec<D3D12_RESOURCE_BARRIER> = [
+            to_read(w_tex, w_state),
+            if single {
+                None
+            } else {
+                to_read(u_tex, u_state)
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         if !before.is_empty() {
             l.ResourceBarrier(&before);
         }
@@ -218,8 +300,13 @@ fn run(world: This, ui: Option<This>, frame: u64) -> bool {
         let params = [inv_gamma.to_bits(), u32::from(single)];
         l.SetComputeRoot32BitConstants(1, 2, params.as_ptr().cast(), 0);
         l.Dispatch(WIDTH.div_ceil(8), HEIGHT.div_ceil(8), 1);
-        let after: Vec<D3D12_RESOURCE_BARRIER> =
-            [back(w_tex, w_state), if single { None } else { back(u_tex, u_state) }].into_iter().flatten().collect();
+        let after: Vec<D3D12_RESOURCE_BARRIER> = [
+            back(w_tex, w_state),
+            if single { None } else { back(u_tex, u_state) },
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         if !after.is_empty() {
             l.ResourceBarrier(&after);
         }

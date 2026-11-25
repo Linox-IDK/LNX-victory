@@ -172,13 +172,17 @@ impl<'a> Lower<'a> {
                 };
 
                 let mut f_s0_lo =
-                    self.s.op(c, "legacyF16ToF32", Attr::ReadNone, f32t, 131, &[s0_lo]);
+                    self.s
+                        .op(c, "legacyF16ToF32", Attr::ReadNone, f32t, 131, &[s0_lo]);
                 let mut f_s0_hi =
-                    self.s.op(c, "legacyF16ToF32", Attr::ReadNone, f32t, 131, &[s0_hi]);
+                    self.s
+                        .op(c, "legacyF16ToF32", Attr::ReadNone, f32t, 131, &[s0_hi]);
                 let mut f_s1_lo =
-                    self.s.op(c, "legacyF16ToF32", Attr::ReadNone, f32t, 131, &[s1_lo]);
+                    self.s
+                        .op(c, "legacyF16ToF32", Attr::ReadNone, f32t, 131, &[s1_lo]);
                 let mut f_s1_hi =
-                    self.s.op(c, "legacyF16ToF32", Attr::ReadNone, f32t, 131, &[s1_hi]);
+                    self.s
+                        .op(c, "legacyF16ToF32", Attr::ReadNone, f32t, 131, &[s1_hi]);
 
                 let z = self.s.m.f32(0x8000_0000);
                 if v.neg & 1 != 0 {

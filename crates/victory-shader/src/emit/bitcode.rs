@@ -242,7 +242,8 @@ impl Module {
     /// Barrier flags emitted before cleanup, for translation regression tests.
     #[cfg(test)]
     pub(crate) fn barrier_modes(&self) -> Vec<u32> {
-        self.insts.iter()
+        self.insts
+            .iter()
             .filter_map(|inst| match &inst.op {
                 Op::Call(f, args) if self.funcs[*f as usize].name == "dx.op.barrier" => {
                     Some(self.int_value(args[1]).expect("constant barrier flags") as u32)
@@ -433,7 +434,12 @@ impl Module {
 
     fn push(&mut self, block: usize, ty: Ty, op: Op) -> V {
         if debug_sealed() {
-            SEALED.with(|x| assert!(!x.borrow().contains(&block), "LNX debug: code added to a block a handshake closed"));
+            SEALED.with(|x| {
+                assert!(
+                    !x.borrow().contains(&block),
+                    "LNX debug: code added to a block a handshake closed"
+                )
+            });
         }
         let i = self.insts.len() as u32;
         self.insts.push(Inst { ty, op });
