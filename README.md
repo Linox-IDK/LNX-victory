@@ -20,7 +20,7 @@ profile, 1080p output.
 | Opening cutscene, prison yard | plays in 3D: hair, haze, sun shafts, textures |
 | Frame rate in the world | about 1.4 fps now that far more of the scene is drawn (4,800-7,200 draws a frame); the GPU is the limit (~500 ms) |
 | Textures | fixed for 8 GB cards: the texture-skip switch now really works (~4 GB of card memory saved) |
-| Shaders | 268 translator tests pass; in a run only 2-4 compute programs fail, no pipeline is refused |
+| Shaders | 268 translator tests pass; 245 of 26,599 shaders do not translate (was 337); in a run only 2-4 compute programs fail, no pipeline is refused |
 | Ray tracing | its structure builder now gets all 53 pipelines, but the title crashes when it runs, so it stays off |
 | Shadowed areas, skin | still dark or black: needs the ray-tracing builder |
 | Stability | no driver hang or device loss; no crash with default settings |
@@ -224,6 +224,7 @@ info and above).
 | `VICTORY_PRESENT_PLANE=<n>` | show plane `n` alone; unset, two planes are composed (Series S) |
 | `VICTORY_GAMMA=<g>` | raise the presented image to 1/g (costs a submission; washes bright scenes) |
 | `VICTORY_LDS_REGION_RACE=1` | LDS read and written in one lane branch taken as two 32-lane waves (shadow and ray-tracing programs on NVIDIA; approximate) |
+| `VICTORY_BALLOT_OWN=1` | experimental: ballots and wave reductions in lane branches use each 32-lane half's own lanes (cascade shadows and water translate, but shadows come out striped) |
 | `VICTORY_LDS_BOUNDS=0` | turn off the console's LDS bounds rule (on by default) |
 | `VICTORY_PSO_DUMP=<dir>` | save the blocks of the unimplemented pipeline calls 0x1c8/0x218 (diagnostics) |
 
