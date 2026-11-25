@@ -8485,6 +8485,8 @@ impl<'a> Lower<'a> {
                 Ok((lo, self.s.m.i32(0)))
             }
         }
+    }
+
     /// The bits of the float nearest the double whose dwords are `lo` and
     /// `hi`, on 32-bit integers: round to nearest even, infinities and NaN
     /// kept (a NaN stays quiet), a result below the smallest normal float
