@@ -1565,6 +1565,7 @@ impl<'a> Lower<'a> {
         if let StageIo::Cs(cs) = x.native.io {
             s.threads = Some(cs.threads);
             s.lds_dwords = cs.lds_bytes() / 4;
+            s.lds_program = s.lds_dwords;
             // Code reading other lanes needs the console's wave size and
             // lane order; so do lane masks read as numbers, and LDS shared
             // within one wave, where the console compiler leaves out barriers.
@@ -1747,6 +1748,7 @@ impl<'a> Lower<'a> {
             s.prims = x.prims.clone();
             s.threads = Some([ms.threads, 1, 1]);
             s.lds_dwords = ms.lds_bytes.div_ceil(4);
+            s.lds_program = s.lds_dwords;
             s.mesh = Some(super::shader::Mesh {
                 max_vertices: ms.max_vertices,
                 max_primitives: ms.max_primitives,
@@ -1786,6 +1788,13 @@ impl<'a> Lower<'a> {
                     no_barrier.insert(b);
                 }
             }
+        }
+        // LNX (as VItoriaBr a13a719): console LDS accesses past the program's own
+        // LDS read 0 and drop writes; the host's are undefined. They go to a sink
+        // dword past everything (`VICTORY_LDS_BOUNDS=0`: unchecked, as before).
+        if s.lds_program > 0 && std::env::var_os("VICTORY_LDS_BOUNDS").is_none_or(|v| v != "0") {
+            s.lds_sink = Some(s.lds_dwords);
+            s.lds_dwords += 1;
         }
         Lower {
             s,
@@ -5188,14 +5197,36 @@ impl<'a> Lower<'a> {
         let a = self.vgprs(inst, addr.as_ref().ok_or("an LDS address")?, 1)?[0];
         // shortcut: LDS addresses are taken as dword-aligned and in bounds
         // (out-of-bounds console accesses read 0 and drop writes).
-        let dword = |l: &mut Self, bytes: u32| -> V {
+        // The dword's pointer and whether it is the program's (an access
+        // past the program's LDS goes to the sink: reads give 0, writes go
+        // nowhere the program reads).
+        let dword = |l: &mut Self, bytes: u32| -> (V, Option<V>) {
             let c = l.cur;
             let o = l.s.m.i32(bytes);
             let at = l.s.m.bin(c, Bin::Add, a, o);
             let two = l.s.m.i32(2);
             let index = l.s.m.bin(c, Bin::LShr, at, two);
+            let (index, ok) = match l.s.lds_sink {
+                Some(sink) => {
+                    let limit = l.s.m.i32(l.s.lds_program);
+                    let ok = l.s.m.cmp(c, pred::IULT, index, limit);
+                    let sink = l.s.m.i32(sink);
+                    (l.s.m.select(c, ok, index, sink), Some(ok))
+                }
+                None => (index, None),
+            };
             let lds = l.s.lds();
-            l.s.m.element(c, lds, index)
+            (l.s.m.element(c, lds, index), ok)
+        };
+        // A value read through a pointer `dword` gave: 0 off the program's LDS.
+        let in_bounds = |l: &mut Self, ok: Option<V>, x: V| -> V {
+            match ok {
+                Some(ok) => {
+                    let z = l.s.m.i32(0);
+                    l.s.m.select(l.cur, ok, x, z)
+                }
+                None => x,
+            }
         };
         let width = |n: &str| match n.rsplit('_').next() {
             Some("b64") => 2,
@@ -5229,7 +5260,7 @@ impl<'a> Lower<'a> {
                 || name.ends_with("_d16_hi")
         });
         if let Some(bits) = sub {
-            let p = dword(self, offset);
+            let (p, ok) = dword(self, offset);
             let o = self.s.m.i32(offset);
             let at = self.s.m.bin(c, Bin::Add, a, o);
             let three = self.s.m.i32(3);
@@ -5239,6 +5270,7 @@ impl<'a> Lower<'a> {
             if name.starts_with("ds_read") {
                 let reg = dst_reg.ok_or("an LDS read result")?;
                 let w = self.s.m.load(c, p);
+                let w = in_bounds(self, ok, w);
                 let x = self.s.m.bin(c, Bin::LShr, w, sh);
                 let x = if base.contains("_i") {
                     let k = self.s.m.i32(32 - bits);
@@ -5300,8 +5332,9 @@ impl<'a> Lower<'a> {
             let mut n = 0;
             for (off, w) in elements {
                 for k in 0..w {
-                    let p = dword(self, off + 4 * k);
+                    let (p, ok) = dword(self, off + 4 * k);
                     let x = self.s.m.load(self.cur, p);
+                    let x = in_bounds(self, ok, x);
                     self.write(inst, Reg::V(reg + n), x, guard);
                     n += 1;
                 }
@@ -5325,7 +5358,7 @@ impl<'a> Lower<'a> {
             }
             let at = self.begin_guarded(guard);
             for (off, x) in stores {
-                let p = dword(self, off);
+                let (p, _) = dword(self, off);
                 self.s.m.store(self.cur, p, x);
             }
             self.end_guarded(at, &[]);
@@ -5361,7 +5394,7 @@ impl<'a> Lower<'a> {
             Some((_, v)) => self.i32_of(v).unwrap_or(self.s.m.i32(0)),
             None => self.s.m.i32(0),
         };
-        let p = dword(self, offset);
+        let (p, ok) = dword(self, offset);
         if let Some(max) = match op.as_str() {
             "max_f32" => Some(true),
             "min_f32" => Some(false),
@@ -5385,6 +5418,7 @@ impl<'a> Lower<'a> {
                 .cmpxchg(self.cur, p, v0, v1.ok_or("an LDS compare")?),
         };
         let r = self.end_guarded(at, &[(r, outside)])[0];
+        let r = in_bounds(self, ok, r);
         if let Some(reg) = dst_reg {
             self.write(inst, Reg::V(reg), r, None);
         }

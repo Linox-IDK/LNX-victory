@@ -163,6 +163,11 @@ pub(crate) struct Shader {
     pub wave_size: Option<u32>,
     /// Thread-group shared memory, in dwords.
     pub lds_dwords: u32,
+    /// The program's own LDS, in dwords (the console's bound for its
+    /// accesses; what the translator adds after it is its own).
+    pub lds_program: u32,
+    /// A dword past everything, where out-of-bounds LDS accesses go.
+    pub lds_sink: Option<u32>,
     lds: Option<V>,
     main: V,
     pub entry: usize,
@@ -216,6 +221,8 @@ impl Shader {
             threads: None,
             wave_size: None,
             lds_dwords: 0,
+            lds_program: 0,
+            lds_sink: None,
             lds: None,
             main,
             entry,
