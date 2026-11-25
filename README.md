@@ -9,20 +9,20 @@ Ryzen 5 9600X, 32 GB RAM, Windows 11).
 **This repository contains no game files, code or assets.** You need your own
 copy. Not affiliated with or endorsed by the title's publisher.
 
-## Where it stands (2026-11-25)
+## Where it stands (2026-11-25, evening)
 
-**Not playable yet, but the world renders close to the real thing.** Series X
+**Reaches gameplay (the prison yard, "Move around") at about 4 fps on an 8 GB RTX 5060 Ti.** Series X
 profile, 1080p output.
 
 | Stage | State |
 | --- | --- |
 | Boot, menus | works, 30 fps |
 | Opening cutscene, prison yard | plays in 3D: hair, haze, sun shafts, textures |
-| Frame rate in the world | about 1.4 fps now that far more of the scene is drawn (4,800-7,200 draws a frame); the GPU is the limit (~500 ms) |
+| Frame rate in the world | 3.3-4.6 fps (was 1.3): `VICTORY_CARD_FETCH_INFLIGHT` off (it tripled GPU time, a VItoriaBr finding) and `VICTORY_TEXTURE_NO_WAIT=1` |
 | Textures | fixed for 8 GB cards: the texture-skip switch now really works (~4 GB of card memory saved) |
 | Shaders | 268 translator tests pass; 245 of 26,599 shaders do not translate (was 337); in a run only 2-4 compute programs fail, no pipeline is refused |
 | Ray tracing | its structure builder now gets all 53 pipelines, but the title crashes when it runs, so it stays off |
-| Shadowed areas, skin | still dark or black: needs the ray-tracing builder |
+| Shadowed areas, skin | lit by a constant ambient floor (from Belobug/VIctory-Belobug-AMD, `VICTORY_AMBIENT`) until ray-traced light runs |
 | Stability | no driver hang or device loss; no crash with default settings |
 
 ## What this fork adds
@@ -50,6 +50,10 @@ profile, 1080p output.
 - **Shader cache that survives rebuilds**, **offline pre-compiling**
   (`VICTORY_WARM_CACHE=1`), **pipeline builders that are not starved**,
   the **R9G9B9E5 colour fix**, **Series S** composition.
+- **Ambient light floor** (from [Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)):
+  after the title's screen-probe resolve, its indirect diffuse light is a
+  constant (`VICTORY_AMBIENT=<level>`, 0.6; `off` keeps the title's), so faces
+  and shaded sides are no longer black.
 - **Diagnostics**: every silent draw drop names its reason;
   `VICTORY_PSO_DUMP=<dir>` saves the blocks of the console pipeline calls
   0x1c8/0x218 that are not implemented yet (16,000+ calls a run).
@@ -60,9 +64,9 @@ Series X profile, `VICTORY_DISPLAY_MODE=1920x1080`, `VICTORY_RELAY=2`,
 `VICTORY_WIDE_BACK=1`, `VICTORY_WIDE_REFRESH=1`, `VICTORY_WIDE_MERGE=1`,
 `VICTORY_CARD_REHASH_RUNS=1`, `VICTORY_JOIN_COPIES=1`,
 `VICTORY_PIPELINE_WAIT_MS=50`, `VICTORY_SHADER_LOOP_LIMIT=1024`,
-`VICTORY_TEXTURE_SKIP_MIPS=1`, `VICTORY_CARD_FETCH_INFLIGHT=1` (copy-back
-~270 -> ~50-80 ms a frame), `VICTORY_LDS_REGION_RACE=1`,
-`VICTORY_FIRSTLANE_OWN=1`.
+`VICTORY_TEXTURE_SKIP_MIPS=1`, `VICTORY_TEXTURE_NO_WAIT=1`,
+`VICTORY_CARD_FETCH_INFLIGHT=0` (on, it saves copy-back time but the GPU takes
+~600 ms instead of ~100), `VICTORY_LDS_REGION_RACE=1`, `VICTORY_FIRSTLANE_OWN=1`.
 
 ## Known problems
 
@@ -82,6 +86,9 @@ Series X profile, `VICTORY_DISPLAY_MODE=1920x1080`, `VICTORY_RELAY=2`,
   contributors: the base of everything (GPL-3.0-or-later, as is this fork).
 - **[victory-gta6](https://github.com/fxceless/victory-gta6)** by fxceless:
   the world rendering, lighting and speed work this fork builds on.
+- **[VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)** by Belobug (ambient light floor),
+  **[VItoriaBr](https://github.com/uiliannn/VItoriaBr)** by Uilian (shader fixes, the 5060 Ti preset findings),
+  **[ztrx](https://github.com/Zettrox/ztrx)** by Zettrox (pull requests).
 - **[XCL](https://github.com/ivall/xcl)** by ivall and contributors, used as a reference.
 - Changes developed with [Claude Code](https://claude.com/claude-code).
 
