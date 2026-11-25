@@ -461,7 +461,7 @@ fn a_backward_permute_reads_across_the_two_host_waves() {
         0x4A02_0000, // v_add_nc_u32 v1, s0, v0        (lane t's dword: s0 + t)
         0x3404_0082, // v_lshlrev_b32 v2, 2, v0        (the lane's byte address)
         0xDACC_0080, // ds_bpermute_b32 v3, v2, v1 offset 128 (32 lanes on)
-        0x0300_0100,
+        0x0300_0102,
         0xE070_1000, // buffer_store_dword v3, v2, s[8:11], 0 offen  (dword t)
         0x8002_0302,
     ];
@@ -527,7 +527,7 @@ fn a_backward_permute_in_a_lane_branch_needs_the_branch_wave_wide() {
         0x4A02_0000, // v_add_nc_u32 v1, s0, v0        (lane t's dword: s0 + t)
         0x3404_0082, // v_lshlrev_b32 v2, 2, v0        (the lane's byte address)
         0xDACC_0080, // ds_bpermute_b32 v3, v2, v1 offset 128 (32 lanes on)
-        0x0300_0100,
+        0x0300_0102,
         0xE070_1000, // buffer_store_dword v3, v2, s[8:11], 0 offen  (dword t)
         0x8002_0302,
         0xBEFE_040C, // s_mov_b64 exec, s[12:13]
@@ -593,4 +593,158 @@ fn a_backward_permute_in_a_lane_branch_needs_the_branch_wave_wide() {
         }
     }
     eprintln!("ran on the hardware device: the permute wave-wide, source lanes outside EXEC at 0");
+}
+
+/// The forward permute (`ds_permute_b32`): each lane's dword goes 32 lanes on, so every lane
+/// takes what the lane 32 on pushed to its own slot: lane t gets s0 + ((t + 32) & 63). The
+/// write side of the backward permute's read.
+#[test]
+fn a_forward_permute_writes_across_the_two_host_waves() {
+    let words = [
+        0x4A02_0000, // v_add_nc_u32 v1, s0, v0        (lane t's dword: s0 + t)
+        0x3404_0082, // v_lshlrev_b32 v2, 2, v0        (the lane's byte address)
+        0xDAC8_0080, // ds_permute_b32 v3, v2, v1 offset 128 (32 lanes on)
+        0x0300_0102,
+        0xE070_1000, // buffer_store_dword v3, v2, s[8:11], 0 offen  (dword t)
+        0x8002_0302,
+    ];
+    let native = native(&words);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    assert!(p
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .any(|i| i.name() == "ds_permute_b32"));
+    let shader = lowered(&native, &p, &HashSet::new()).expect("lower");
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        let mut copy = shader.dxil.clone();
+        v.validate(&mut copy).expect("DXIL validation failed");
+    }
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(host) = Host::new(false) else {
+        eprintln!("no SM 6.6 hardware device; not run");
+        return;
+    };
+    let (root, pso) = match host.compute_pipeline(&shader) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("the hardware device does not take this program (waves of 32?): {e}; not run");
+            return;
+        }
+    };
+    for (s0, s1) in [(7u32, 0u32), (0x100, 1)] {
+        let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+        for u in &shader.user_data {
+            if let (RootType::Constants, 0, d @ 0..=1) = (u.root, u.slot, u.dword) {
+                ud[u.index as usize] = [s0, s1][d as usize];
+            }
+        }
+        let out = host
+            .dispatch(
+                &root,
+                &pso,
+                &Dispatch {
+                    roots: vec![(0, Root::Constants(ud))],
+                    views: &[View::RawUav(64)],
+                    samplers: &[],
+                    groups: [1, 1, 1],
+                },
+            )
+            .unwrap_or_else(|e| panic!("dispatch failed: {e}"));
+        for t in 0..64u32 {
+            assert_eq!(out[0][t as usize], s0 + ((t + 32) & 63), "lane {t}, s0 {s0:#x}");
+        }
+    }
+    eprintln!("ran on the hardware device: every lane takes what the lane 32 on wrote to it");
+}
+
+/// The same permute where only the lanes below s0 run it: refused per lane (the barriers need
+/// every lane of the group), the branch it sits in named; wave-wide, a lane outside EXEC
+/// writes nothing and no lane writes its result (so a slot no lane names holds what it had,
+/// which the console leaves undefined too — only the lanes whose writer ran are checked).
+#[test]
+fn a_forward_permute_in_a_lane_branch_needs_the_branch_wave_wide() {
+    let words = [
+        0x7D88_0000, // v_cmp_gt_u32 vcc, s0, v0
+        0xBE8C_246A, // s_and_saveexec_b64 s[12:13], vcc
+        0xBF88_0006, // s_cbranch_execz over the body, to the restore of EXEC
+        0x4A02_0000, // v_add_nc_u32 v1, s0, v0        (lane t's dword: s0 + t)
+        0x3404_0082, // v_lshlrev_b32 v2, 2, v0        (the lane's byte address)
+        0xDAC8_0080, // ds_permute_b32 v3, v2, v1 offset 128 (32 lanes on)
+        0x0300_0102,
+        0xE070_1000, // buffer_store_dword v3, v2, s[8:11], 0 offen  (dword t)
+        0x8002_0302,
+        0xBEFE_040C, // s_mov_b64 exec, s[12:13]
+    ];
+    let native = native(&words);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    let branch = (0..p.blocks.len())
+        .find(|&b| p.blocks[b].insts.last().is_some_and(|i| i.name() == "s_cbranch_execz"))
+        .expect("the branch");
+    lower::take_needs();
+    let per_lane = lowered(&native, &p, &HashSet::new());
+    assert!(
+        matches!(&per_lane, Err(ShaderError::Unsupported { what, .. })
+            if *what == "a lane permute across two host waves where not every lane runs"),
+        "{:?}",
+        per_lane.err()
+    );
+    let st = structure::structure(&p).expect("structure");
+    assert_eq!(lower::branches_around(&st, &lower::take_needs()), Some(vec![branch]));
+    let shader = lowered(&native, &p, &HashSet::from([branch])).expect("lower");
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        let mut copy = shader.dxil.clone();
+        v.validate(&mut copy).expect("DXIL validation failed");
+    }
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(host) = Host::new(false) else {
+        eprintln!("no SM 6.6 hardware device; not run");
+        return;
+    };
+    let (root, pso) = match host.compute_pipeline(&shader) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("the hardware device does not take this program (waves of 32?): {e}; not run");
+            return;
+        }
+    };
+    // (lanes below s0 run the body) lane t stores only when it is inside, and takes what the
+    // lane that named its slot wrote when that lane ran it
+    for below in [64u32, 40, 8] {
+        let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+        for u in &shader.user_data {
+            if let (RootType::Constants, 0, 0) = (u.root, u.slot, u.dword) {
+                ud[u.index as usize] = below;
+            }
+        }
+        let out = host
+            .dispatch(
+                &root,
+                &pso,
+                &Dispatch {
+                    roots: vec![(0, Root::Constants(ud))],
+                    views: &[View::RawUav(64)],
+                    samplers: &[],
+                    groups: [1, 1, 1],
+                },
+            )
+            .unwrap_or_else(|e| panic!("dispatch failed: {e}"));
+        let inside = |lane: u32| lane < below;
+        for t in 0..64u32 {
+            if !inside(t) {
+                // the console writes the result of no lane outside EXEC, and
+                // its store to the output is off
+                assert_eq!(out[0][t as usize], 0, "lane {t}, {below} lanes inside");
+                continue;
+            }
+            let source = (t + 32) & 63;
+            if !inside(source) {
+                // no lane named this lane's slot: what it holds is undefined
+                // (on the console, what its LDS held there)
+                continue;
+            }
+            assert_eq!(out[0][t as usize], below + source, "lane {t}, {below} lanes inside");
+        }
+    }
+    eprintln!("ran on the hardware device: the permute wave-wide, lanes outside EXEC write nothing");
 }
