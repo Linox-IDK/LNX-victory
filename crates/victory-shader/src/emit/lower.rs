@@ -874,6 +874,14 @@ const HS_WAVE: u32 = 2 + 8 * HS_SITES;
 /// `VICTORY_LANE_HANDSHAKE=1` (LNX, off by default): a console wave run as two host
 /// waves of 32 exchanges ballots and any-lane answers inside lane branches without a
 /// barrier ([`Lower::hs_exchange`]).
+/// `VICTORY_HS_SPIN`: rounds a handshake waits for the other half at most.
+fn hs_spin() -> u32 {
+    static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("VICTORY_HS_SPIN").ok().and_then(|v| v.parse().ok()).unwrap_or(1 << 18)
+    })
+}
+
 fn lane_handshake() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_LANE_HANDSHAKE").is_some_and(|v| v == "1"))
@@ -4471,6 +4479,12 @@ impl<'a> Lower<'a> {
     /// before it, so a half still waiting in one stops waiting for it.
     fn hs_done(&mut self) {
         let c = self.cur;
+        self.hs_done_at(c);
+    }
+
+    /// [`Lower::hs_done`] in block `c` (also where the program ends inside a lane branch,
+    /// or aborts: the other half must not wait for this one there).
+    fn hs_done_at(&mut self, c: usize) {
         let (_, half) = self.hs_area();
         let p = self.hs_ptr(c, 0, half);
         let all = self.s.m.i32(u32::MAX);
@@ -4677,7 +4691,17 @@ impl<'a> Lower<'a> {
         }
         let seen = self.s.m.atomic(lp, Rmw::Or, their_progress, z);
         let there = self.s.m.cmp(lp, pred::IUGE, seen, pos);
-        self.s.m.terminate(lp, Term::CondBr(there, exit, lp));
+        // A bounded wait: past `VICTORY_HS_SPIN` rounds (2^18) the other half's value is
+        // taken as it is (0 when it did not come), never a hang of the card.
+        let i32t = self.s.t.i32;
+        let n = self.s.m.phi(lp, i32t);
+        let one = self.s.m.i32(1);
+        let n1 = self.s.m.bin(lp, Bin::Add, n, one);
+        self.s.m.set_phi(n, vec![(z, c), (n1, lp)]);
+        let limit = self.s.m.i32(hs_spin());
+        let tired = self.s.m.cmp(lp, pred::IUGE, n1, limit);
+        let go = self.s.m.bin(lp, Bin::Or, there, tired);
+        self.s.m.terminate(lp, Term::CondBr(go, exit, lp));
         self.cur = exit;
         let v = self.s.m.atomic(exit, Rmw::Or, their_value, z);
         let t = self.s.m.atomic(exit, Rmw::Or, their_tag, z);
@@ -12664,6 +12688,9 @@ impl<'a> Lower<'a> {
                 Term::CondBr(cond, t, f)
             }
             LaneExit::End => {
+                if self.hs.is_some() {
+                    self.hs_done();
+                }
                 if self.s.pixel && !self.exported[b] && !self.has_done_export(b) {
                     // A lane leaving without its final export was killed.
                     let t = self.s.m.bool(true);
@@ -12732,6 +12759,9 @@ impl<'a> Lower<'a> {
             return a;
         }
         let a = self.s.m.new_block();
+        if self.hs.is_some() {
+            self.hs_done_at(a);
+        }
         if self.s.pixel {
             let t = self.s.m.bool(true);
             self.s
