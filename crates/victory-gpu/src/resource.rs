@@ -1832,6 +1832,9 @@ fn reserved_texture(
     let mut r = *d;
     // D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE: what reserved textures take.
     r.layout = 2;
+    // Reserved textures take only the default (64 KiB) alignment; the
+    // title's small-texture 4 KiB one makes the host refuse every one.
+    r.alignment = 0;
     let mut texture: Option<ID3D12Resource> = None;
     // SAFETY: a texture description in the host layout; out pointer ours.
     let made = unsafe {
@@ -1843,7 +1846,8 @@ fn reserved_texture(
         )
     };
     if let Err(e) = made {
-        tracing::debug!(error = %e, "no reserved texture; a whole one instead");
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| tracing::warn!(error = %e, width = r.width, height = r.height, format = r.format, mips = r.mip_levels, "no reserved texture; a whole one instead"));
         return None;
     }
     let texture = texture?;
