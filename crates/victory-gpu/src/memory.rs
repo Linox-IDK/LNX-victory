@@ -195,6 +195,7 @@ impl Memory {
     }
 
     /// The pages shaders found empty since the last frame.
+    /// (LNX: the frame of the last such find goes to [`LAST_FAULT_FRAME`].)
     fn take_faults(&mut self) {
         let mut pages = Vec::new();
         for i in 1..MEMORY_FAULTS as usize {
@@ -210,6 +211,7 @@ impl Memory {
             }
         }
         if !pages.is_empty() {
+            LAST_FAULT_FRAME.store(crate::queue::presented(), std::sync::atomic::Ordering::Relaxed);
             // Each is an access that read 0 or was dropped.
             static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             if SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 50 {
@@ -317,3 +319,7 @@ pub(crate) fn ready(
         base,
     })
 }
+
+/// The frame (presents so far) in which shaders last touched title pages that had no copy
+/// (LNX: the ray-tracing builder's warm-up, `crate::pipeline::builder_quarantined`).
+pub(crate) static LAST_FAULT_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

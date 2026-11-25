@@ -190,6 +190,9 @@ fn windows() -> bool {
 #[derive(Default)]
 pub(crate) struct State {
     pipeline: usize,
+    /// The X thread count of the dispatch by threads being bound, else 0
+    /// (`victory_shader::emit::USER_DISPATCH_THREADS_X`).
+    dispatch_threads_x: u32,
     /// View heap, sampler heap.
     heaps: [usize; 2],
     graphics: Vec<Root>,
@@ -774,6 +777,9 @@ impl State {
         memory: Option<&crate::memory::Ready>,
     ) -> u32 {
         use victory_shader::emit::{USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS};
+        if kind == victory_shader::emit::USER_DISPATCH_THREADS_X {
+            return self.dispatch_threads_x;
+        }
         if kind == USER_MEMORY_BASE {
             return memory.map_or(0, |m| m.base);
         }
@@ -2060,6 +2066,7 @@ impl State {
                 match crate::pipeline::compute_threads(self.pipeline as This) {
                     Some([tx, ty, tz]) if tx > 0 && ty > 0 && tz > 0 => {
                         once!(flags = f, threads = ?[x, y, z], size = ?[tx, ty, tz], "a dispatch by threads (DispatchX flag 0x20) runs as groups");
+                        self.dispatch_threads_x = x;
                         (x.div_ceil(tx), y.div_ceil(ty), z.div_ceil(tz))
                     }
                     _ => {
@@ -2118,6 +2125,8 @@ impl State {
         list.note_op(|| self.op_text(format!("dispatch {x}x{y}x{z}"), true));
         // SAFETY: an open list with everything set.
         unsafe { list.list.Dispatch(x, y, z) };
+        // Later dispatches run whole groups (the word is set again at their bind).
+        self.dispatch_threads_x = 0;
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
         // The least indirect light after the program that resolves it; then
         // the title's state goes back on the list.

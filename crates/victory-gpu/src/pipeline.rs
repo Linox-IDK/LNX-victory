@@ -276,8 +276,40 @@ fn of_builder(shaders: &[Arc<Shader>]) -> bool {
 #[cfg(windows)]
 pub(crate) fn builder_quarantined(this: This) -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    is_builder(this) && *ON.get_or_init(|| std::env::var_os("VICTORY_BVH_QUARANTINE").is_some_and(|v| v == "1"))
+    is_builder(this)
+        && (*ON.get_or_init(|| std::env::var_os("VICTORY_BVH_QUARANTINE").is_some_and(|v| v == "1"))
+            || builder_warming())
 }
+
+/// LNX: the builder's warm-up. A page the builder reaches only through a pointer it read
+/// out of memory has no copy the first time (the read gives 0, the store is dropped; see
+/// `crate::memory`): what it then writes back would hand the title pointers of 0 and -1.
+/// So its stores stay in the host's copies (as with `VICTORY_BVH_QUARANTINE=1`) for
+/// `VICTORY_BVH_WARMUP` frames (30; 0: off) after it starts and after each frame that
+/// found pages without a copy.
+#[cfg(windows)]
+fn builder_warming() -> bool {
+    static FRAMES: OnceLock<u64> = OnceLock::new();
+    let frames = *FRAMES.get_or_init(|| {
+        std::env::var("VICTORY_BVH_WARMUP").ok().and_then(|v| v.parse().ok()).unwrap_or(30)
+    });
+    if frames == 0 {
+        return false;
+    }
+    let now = crate::queue::presented();
+    let started = BUILDER_STARTED.load(std::sync::atomic::Ordering::Relaxed);
+    let fault = crate::memory::LAST_FAULT_FRAME.load(std::sync::atomic::Ordering::Relaxed);
+    let warm = now < started + frames || now < fault + frames;
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !warm && started > 0 && !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::info!(frame = now, "the ray-tracing structure builder is warm: its stores go back into title memory");
+    }
+    warm
+}
+
+/// The frame the builder first ran in (0: not yet).
+#[cfg(windows)]
+static BUILDER_STARTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The thread-group size of the title's compute pipeline `this` (`numthreads`), read from
 /// its container's console program.
@@ -374,6 +406,7 @@ pub(crate) fn builder_runs(this: This) -> bool {
         "the ray-tracing structure builder runs: all of its programs have host pipelines"
     );
     b.whole = true;
+    BUILDER_STARTED.store(crate::queue::presented().max(1), std::sync::atomic::Ordering::Relaxed);
     true
 }
 

@@ -2589,6 +2589,33 @@ impl<'a> Lower<'a> {
 
     fn run(mut self) -> Result<Lowered, Stop> {
         let p = self.x.p;
+        // LNX (after DexNom bc3cd4b): the ray-tracing builder's programs (a spilled user-data
+        // table) can be dispatched by threads; the host runs whole groups, so threads past
+        // the count return at once. Not where a group barrier would then wait for them.
+        if crate::spill::is_spilled(self.x.native)
+            && let Some([width, ..]) = self.s.threads
+            && !p.blocks.iter().flat_map(|b| &b.insts).any(|i| i.name() == "s_barrier")
+        {
+            use super::shader::USER_DISPATCH_THREADS_X;
+            let original = self.s.entry;
+            let limit = self.host_word(RootType::Other(USER_DISPATCH_THREADS_X), 0, width);
+            let (Val::I32(group), Val::I32(thread)) =
+                (self.compute_id("groupId.i32", 94, 0), self.thread_id(0))
+            else {
+                return Err(Stop::Fail(crate::ShaderError::Malformed("thread ids")));
+            };
+            let w = self.s.m.i32(width);
+            let first = self.s.m.bin(original, Bin::Mul, group, w);
+            let x = self.s.m.bin(original, Bin::Add, first, thread);
+            let zero = self.s.m.i32(0);
+            let unlimited = self.s.m.cmp(original, pred::EQ, limit, zero);
+            let inside = self.s.m.cmp(original, pred::IULT, x, limit);
+            let active = self.s.m.bin(original, Bin::Or, unlimited, inside);
+            let (body, done) = (self.s.m.new_block(), self.s.m.new_block());
+            self.s.m.terminate(original, Term::CondBr(active, body, done));
+            self.s.m.terminate(done, Term::Ret);
+            self.s.entry = body;
+        }
         let order = crate::ir::reverse_postorder(&p.blocks);
         for (n, &b) in order.iter().enumerate() {
             self.rpo[b] = n;
