@@ -9,7 +9,7 @@ Ryzen 5 9600X, 32 GB RAM, Windows 11).
 **This repository contains no game files, code or assets.** You need your own
 copy. Not affiliated with or endorsed by the title's publisher.
 
-> **Notice: no updates until at least Monday 30 November, 7 pm.**
+> **Notice: no updates until at least Monday 30 November, 7 pm (France time, CET).**
 > The maintainer cannot work on this personally until then, so there will be no new commits,
 > issue replies or fixes before that time. Work continues afterwards: more fixes and improvements
 > are planned and will land here once the maintainer is back.
